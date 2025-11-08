@@ -13,23 +13,22 @@ export estimate_motion_parameters
 
 
 # --- Top-level functions ---
-function estimate_motion_parameters(img::Array{<:Real,4}; ref_mode=:first, subsample=4, mask=nothing, fwhm=3.0)
-    sx, sy, sz, nt = size(img)
-    reference = ref_mode == :mean ? mean(img, dims=4)[:, :, :, 1] : img[:, :, :, 1]
-    reference = smooth_image(reference, fwhm)
+function estimate_motion_parameters(img::Array{T,4}; ref_mode=:first, subsample=4, mask=nothing, fwhm=T(3)) where {T<:Real}
+    img_s = (fwhm === nothing || fwhm == 0) ? img : smooth_image(img, fwhm)
+
+    reference = ref_mode == :mean ? mean(img_s, dims=4)[:, :, :, 1] : img_s[:, :, :, 1]
 
     center = voxelcenter(reference)
-    motion_params = zeros(nt, 6)
+    motion_params = zeros(size(img_s, 4), 6)
 
-    mask_inds = findall(mask)
-    mask_inds = mask_inds[rand(1:subsample, length(mask_inds)).==1]
+    _mask_inds = findall(mask)
+    mask_inds = _mask_inds[rand(1:subsample, length(_mask_inds)).==1]
 
-    Threads.@threads for t in 1:nt
-        println("Estimating motion parameters $t / $nt ...")
-        moving = img[:, :, :, t]
-        moving = smooth_image(moving, fwhm)
-        p_est = estimate_rigid(reference, moving, center, mask_inds)
-        motion_params[t, :] .= p_est
+    Threads.@threads for t ∈ axes(img_s, 4)
+        moving = img_s[:, :, :, t]
+        fgh! = make_fgh_function(reference, moving, center, mask_inds)
+        res = optimize(Optim.only_fgh!(fgh!), zeros(6), NewtonTrustRegion())
+        motion_params[t, :] .= Optim.minimizer(res)
     end
 
     return motion_params
@@ -52,49 +51,36 @@ end
 # end
 
 
-## --- Rigid estimation ---
-function estimate_rigid(reference, moving, center, mask_inds)
-    fgh! = make_fgh_function(reference, moving, center, mask_inds)
-    res = optimize(Optim.only_fgh!(fgh!), zeros(6), NewtonTrustRegion())
-    return Optim.minimizer(res)
-end
-
-
 # --- Combined f, g, h! for Optim.only_fg! or Newton trust-region ---
-function make_fgh_function(reference::Array{Float64,3}, moving::Array{Float64,3}, center, mask_inds)
-    img_shape = size(moving)
-
+function make_fgh_function(reference::AbstractArray{T,3}, moving::AbstractArray{T,3}, center, mask_inds) where T
     ref_itp = extrapolate(interpolate(reference, BSpline(Cubic())), 0.0)
     mov_itp = extrapolate(interpolate(moving, BSpline(Cubic())), 0.0)
 
-    warped = zeros(Float64, img_shape)
-    grad_field = [zeros(SVector{3,Float64}) for _ ∈ CartesianIndices(img_shape)]
-    hess_field = [zeros(SMatrix{3,3,Float64}) for _ ∈ CartesianIndices(img_shape)]
-    diff_vals = zeros(Float64, length(mask_inds))
+    grad_field = [gradient(ref_itp, i[1], i[2], i[3]) for i ∈ mask_inds]
+    hess_field = [ hessian(ref_itp, i[1], i[2], i[3]) for i ∈ mask_inds]
 
-    warp_grad_hess!(nothing, grad_field, hess_field, ref_itp, nothing, mask_inds)
+    diff_vals = similar(mask_inds, T)
 
     function fgh!(F, G, H, p)
-        A = rigid_affine_from_params(p, center)
-        warp_grad_hess!(warped, nothing, nothing, mov_itp, A, mask_inds)
-
         # Residuals
-        @inbounds for (n, I) in enumerate(mask_inds)
-            diff_vals[n] = reference[I] - warped[I]
+        A = rigid_affine_from_params(p, center)
+        @inbounds for (n, i) in enumerate(mask_inds)
+            v = A * SVector{4,T}(i[1], i[2], i[3], 1)
+            diff_vals[n] = reference[i] - mov_itp(v[1], v[2], v[3])
         end
 
         # Objective value
         F = sum(abs2, diff_vals)
 
         # Initialize gradient and Hessian
-        if G !== nothing; fill!(G, 0); end
-        if H !== nothing; fill!(H, 0); end
+        G === nothing || fill!(G, 0)
+        H === nothing || fill!(H, 0)
 
         # Per-voxel contributions
-        @inbounds for (n, I) in enumerate(mask_inds)
-            x = I[1] - center[1]
-            y = I[2] - center[2]
-            z = I[3] - center[3]
+        @inbounds for i ∈ eachindex(mask_inds)
+            x = mask_inds[i][1] - center[1]
+            y = mask_inds[i][2] - center[2]
+            z = mask_inds[i][3] - center[3]
 
             # ∂x/∂params (3×6 Jacobian)
             Jx = @SMatrix [
@@ -103,9 +89,9 @@ function make_fgh_function(reference::Array{Float64,3}, moving::Array{Float64,3}
                 y -x 0 0 0 1
             ]
 
-            gI = grad_field[I]      # ∂I/∂x, shape (3,)
-            HI = hess_field[I]      # ∂²I/∂x², shape (3×3)
-            r = diff_vals[n]
+            gI = grad_field[i]      # ∂I/∂x, shape (3,)
+            HI = hess_field[i]      # ∂²I/∂x², shape (3×3)
+            r = diff_vals[i]
 
             if G !== nothing
                 G .+= (-2r) .* (Jx' * gI)
@@ -124,21 +110,6 @@ function make_fgh_function(reference::Array{Float64,3}, moving::Array{Float64,3}
 end
 
 
-# --- warp, gradient, and hessian ---
-function warp_grad_hess!(warped, grad_field, hess_field, itp, A, inds)
-    for I in inds
-        if A === nothing
-            x, y, z = I[1], I[2], I[3]
-        else
-            v = A * SVector{4,Float64}(I[1], I[2], I[3], 1.0)
-            x, y, z = v[1], v[2], v[3]
-        end
-        warped === nothing || (warped[I] = itp(x, y, z))
-        grad_field === nothing || (grad_field[I] = gradient(itp, x, y, z)) # TODO: test gradient!
-        hess_field === nothing || (hess_field[I] = hessian(itp, x, y, z))
-    end
-end
-
 ## --- utilities ---
 """
     smooth_image(img, fwhm; voxel_size=(1,1,1))
@@ -146,10 +117,19 @@ end
 Smooth a 3D volume with a Gaussian kernel of given `fwhm` (in the same units as `voxel_size`).
 Returns a Float64 array.
 """
-function smooth_image(img::AbstractArray{<:Real,3}, fwhm::Real; voxel_size=(4.0, 4.0, 4.0))
+function smooth_image(img::AbstractArray{T,3}, fwhm::T; voxel_size=ntuple(_ -> T(4), 3)) where {T<:Real}
     # Convert FWHM [mm] → σ [voxels]
     σ = ntuple(i -> (fwhm / (2√(2log(2)))) / voxel_size[i], 3)
-    return imfilter(img, Kernel.gaussian(σ))
+    img = imfilter(img, Kernel.gaussian(σ))
+    return img
+end
+
+function smooth_image(img::AbstractArray{T,4}, fwhm::T; voxel_size=ntuple(_ -> T(4), 3)) where {T<:Real}
+    img_s = similar(img)
+    Threads.@threads for it ∈ axes(img, 4)
+        @views img_s[:, :, :, it] .= smooth_image(img[:, :, :, it], fwhm; voxel_size)
+    end
+    return img_s
 end
 
 
