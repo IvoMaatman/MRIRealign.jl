@@ -24,10 +24,11 @@ function estimate_motion_parameters(img::Array{T,4}; ref_mode=:first, subsample=
     _mask_inds = findall(mask)
     mask_inds = _mask_inds[rand(1:subsample, length(_mask_inds)).==1]
 
+    p0 = zeros(T, 6)
     Threads.@threads for t ∈ axes(img_s, 4)
         moving = img_s[:, :, :, t]
         fgh! = make_fgh_function(reference, moving, center, mask_inds)
-        res = optimize(Optim.only_fgh!(fgh!), zeros(6), NewtonTrustRegion())
+        res = optimize(Optim.only_fgh!(fgh!), p0, NewtonTrustRegion())
         motion_params[t, :] .= Optim.minimizer(res)
     end
 
@@ -135,26 +136,33 @@ end
 
 function rigid_affine_from_params(p, center)
     rx, ry, rz, tx, ty, tz = p
-    Rx = @SMatrix [1 0 0; 0 cos(rx) -sin(rx); 0 sin(rx) cos(rx)]
-    Ry = @SMatrix [cos(ry) 0 sin(ry); 0 1 0; -sin(ry) 0 cos(ry)]
-    Rz = @SMatrix [cos(rz) -sin(rz) 0; sin(rz) cos(rz) 0; 0 0 1]
+    Rx = @SMatrix [1 0 0 0; 0 cos(rx) -sin(rx) 0; 0 sin(rx) cos(rx) 0; 0 0 0 1]
+    Ry = @SMatrix [cos(ry) 0 sin(ry) 0; 0 1 0 0; -sin(ry) 0 cos(ry) 0; 0 0 0 1]
+    Rz = @SMatrix [cos(rz) -sin(rz) 0 0; sin(rz) cos(rz) 0 0; 0 0 1 0; 0 0 0 1]
     R = Rz * Ry * Rx
 
-    T_center_to_origin = Matrix{Float64}(I, 4, 4)
-    T_center_to_origin[1:3, 4] .= -collect(center)
+    T_center_to_origin = @SMatrix [
+        1 0 0 -center[1]
+        0 1 0 -center[2]
+        0 0 1 -center[3]
+        0 0 0 1
+    ]
 
-    T_back = Matrix{Float64}(I, 4, 4)
-    T_back[1:3, 4] .= collect(center)
+    T_back = @SMatrix [
+        1 0 0 center[1]
+        0 1 0 center[2]
+        0 0 1 center[3]
+        0 0 0 1
+    ]
 
-    Arot = Matrix{Float64}(I, 4, 4)
-    Arot[1:3, 1:3] .= R
+    Atrans = @SMatrix [
+        1 0 0 tx
+        0 1 0 ty
+        0 0 1 tz
+        0 0 0 1
+    ]
 
-    Atrans = Matrix{Float64}(I, 4, 4)
-    Atrans[1, 4] = tx
-    Atrans[2, 4] = ty
-    Atrans[3, 4] = tz
-
-    return SMatrix{4,4,Float64}(Atrans * T_back * Arot * T_center_to_origin)
+    return Atrans * T_back * R * T_center_to_origin
 end
 
 voxelcenter(vol) = ((size(vol, 1) + 1) / 2, (size(vol, 2) + 1) / 2, (size(vol, 3) + 1) / 2)
