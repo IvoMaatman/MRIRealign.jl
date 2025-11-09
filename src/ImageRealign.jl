@@ -8,31 +8,63 @@ using Interpolations
 using Interpolations: gradient, hessian
 using ImageFiltering
 using Statistics
+using OhMyThreads
 
 export estimate_motion_parameters
 
 
 # --- Top-level functions ---
-function estimate_motion_parameters(img::Array{T,4}; ref_mode=:first, subsample=4, mask=nothing, fwhm=T(3)) where {T<:Real}
+function estimate_motion_parameters(img::Array{T,4}; ref_mode=:consensus, subsample=4, mask=nothing, fwhm=T(3)) where {T<:Real}
     img_s = (fwhm === nothing || fwhm == 0) ? img : smooth_image(img, fwhm)
 
-    reference = ref_mode == :mean ? mean(img_s, dims=4)[:, :, :, 1] : img_s[:, :, :, 1]
-
-    center = voxelcenter(reference)
-    motion_params = zeros(size(img_s, 4), 6)
-
-    _mask_inds = findall(mask)
-    mask_inds = _mask_inds[rand(1:subsample, length(_mask_inds)).==1]
-
-    p0 = zeros(T, 6)
-    Threads.@threads for t ∈ axes(img_s, 4)
-        moving = img_s[:, :, :, t]
-        fgh! = make_fgh_function(reference, moving, center, mask_inds)
-        res = optimize(Optim.only_fgh!(fgh!), p0, NewtonTrustRegion())
-        motion_params[t, :] .= Optim.minimizer(res)
+    _interpolate(x) = extrapolate(interpolate(x, BSpline(Cubic())), Interpolations.Flat())
+    @views Tint = typeof(_interpolate(img_s[:, :, :, 1]))
+    img_itp = Vector{Tint}(undef, size(img_s, 4))
+    @tasks for t ∈ eachindex(img_itp)
+        @views img_itp[t] = _interpolate(img_s[:, :, :, t])
     end
 
-    return motion_params
+    @views center = voxelcenter(img_s[:, :, :, 1])
+    # reference = ref_mode == :mean ? mean(img_s, dims=4)[:, :, :, 1] : img_s[:, :, :, 1]
+
+    if ref_mode == :first
+        t_refs = 1
+    elseif ref_mode == :consensus
+        t_refs = 1:length(img_itp)
+    else
+        error() # TODO message
+    end
+
+
+
+    mask_inds = [Tuple(idx) .+ rand(NTuple{3,T}) .- T(0.5) for idx ∈ findall(mask)]
+    # _mask_inds = [Tuple(idx) for idx ∈ findall(mask)]
+    # _mask_inds = [_mask_inds; [idx .+ T.((0.5, 0, 0)) for idx ∈ _mask_inds]]
+    # _mask_inds = [_mask_inds; [idx .+ T.((0, 0.5, 0)) for idx ∈ _mask_inds]]
+    # _mask_inds = [_mask_inds; [idx .+ T.((0, 0, 0.5)) for idx ∈ _mask_inds]]
+    # mask_inds = [idx .+ rand(NTuple{3,T}) .- T(0.5) for idx ∈ _mask_inds]
+
+    motion_params = zeros(6, length(img_itp), length(t_refs))
+    for (i_ref, t_ref) ∈ enumerate(t_refs)
+        reference = [img_itp[t_ref](idx[1], idx[2], idx[3]) for idx in mask_inds]
+        grad_field = [gradient(img_itp[t_ref], idx[1], idx[2], idx[3]) for idx ∈ mask_inds]
+        hess_field = [hessian(img_itp[t_ref], idx[1], idx[2], idx[3]) for idx ∈ mask_inds]
+
+        p0 = zeros(T, 6)
+        @tasks for t ∈ axes(img_s, 4)
+            @local diff_vals = similar(mask_inds, T)
+
+            fgh! = make_fgh_function(reference, img_itp[t_ref], img_itp[t], center, mask_inds, grad_field, hess_field, diff_vals)
+            res = optimize(Optim.only_fgh!(fgh!), p0, NewtonTrustRegion())
+            motion_params[:, t, i_ref] .= Optim.minimizer(res)
+        end
+    end
+
+    if ref_mode == :consensus
+        return weighted_mean_estimate(motion_params)
+    else
+        return motion_params
+    end
 end
 
 
@@ -42,7 +74,7 @@ end
 #     center = voxelcenter(img[:,:,:,1])
 #     aligned = Array{Float64,4}(undef, sx, sy, sz, nt)
 
-#     Threads.@threads for t in 1:nt
+#     @tasks for t in 1:nt
 #         println("Realigning volume $t / $nt ...")
 #         A = rigid_affine_from_params(motion_params[t, :], center)
 #         aligned[:,:,:,t] = warp_volume_itp(moving, A, (sx,sy,sz))
@@ -53,21 +85,14 @@ end
 
 
 # --- Combined f, g, h! for Optim.only_fg! or Newton trust-region ---
-function make_fgh_function(reference::AbstractArray{T,3}, moving::AbstractArray{T,3}, center, mask_inds) where T
-    ref_itp = extrapolate(interpolate(reference, BSpline(Cubic())), 0.0)
-    mov_itp = extrapolate(interpolate(moving, BSpline(Cubic())), 0.0)
-
-    grad_field = [gradient(ref_itp, i[1], i[2], i[3]) for i ∈ mask_inds]
-    hess_field = [ hessian(ref_itp, i[1], i[2], i[3]) for i ∈ mask_inds]
-
-    diff_vals = similar(mask_inds, T)
+function make_fgh_function(reference::AbstractVector{T}, ref_itp, mov_itp, center, mask_inds, grad_field, hess_field, diff_vals) where T
 
     function fgh!(F, G, H, p)
         # Residuals
         A = rigid_affine_from_params(p, center)
         @inbounds for (n, i) in enumerate(mask_inds)
             v = A * SVector{4,T}(i[1], i[2], i[3], 1)
-            diff_vals[n] = reference[i] - mov_itp(v[1], v[2], v[3])
+            diff_vals[n] = reference[n] - mov_itp(v[1], v[2], v[3])
         end
 
         # Objective value
@@ -127,7 +152,7 @@ end
 
 function smooth_image(img::AbstractArray{T,4}, fwhm::T; voxel_size=ntuple(_ -> T(4), 3)) where {T<:Real}
     img_s = similar(img)
-    Threads.@threads for it ∈ axes(img, 4)
+    @tasks for it ∈ axes(img, 4)
         @views img_s[:, :, :, it] .= smooth_image(img[:, :, :, it], fwhm; voxel_size)
     end
     return img_s
@@ -166,6 +191,25 @@ function rigid_affine_from_params(p, center)
 end
 
 voxelcenter(vol) = ((size(vol, 1) + 1) / 2, (size(vol, 2) + 1) / 2, (size(vol, 3) + 1) / 2)
+
+
+function weighted_mean_estimate(estimates; max_iter=100, tol=1e-6)
+    consensus = mean(estimates; dims=3) # Initial guess
+
+    for _ = 1:max_iter
+        residuals = estimates .- consensus
+        weights = 1 ./ (1 .+ sqrt.(sum(abs2, residuals; dims=2))) # Update weights (inverse of RMSE)
+
+        consensus_old = consensus
+        consensus = sum((weights .* estimates); dims=3) ./ sum(weights; dims=3) # Compute new weighted mean
+
+        if norm(consensus .- consensus_old) < tol
+            break
+        end
+    end
+    consensus = dropdims(consensus, dims=3)
+    return consensus
+end
 
 
 end
