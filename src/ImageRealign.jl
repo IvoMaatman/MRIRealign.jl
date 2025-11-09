@@ -25,24 +25,17 @@ function estimate_motion_parameters(img::Array{T,4}; ref_mode=:consensus, subsam
     end
 
     @views center = voxelcenter(img_s[:, :, :, 1])
-    # reference = ref_mode == :mean ? mean(img_s, dims=4)[:, :, :, 1] : img_s[:, :, :, 1]
 
-    if ref_mode == :first
-        t_refs = 1
-    elseif ref_mode == :consensus
-        t_refs = 1:length(img_itp)
-    else
-        error() # TODO message
-    end
+    t_refs = ref_mode == :consensus ? (1:length(img_itp)) : ref_mode
 
-
-
+    # random shifts seem to help with the speed of convertion (cf. SPM)
     mask_inds = [Tuple(idx) .+ rand(NTuple{3,T}) .- T(0.5) for idx ∈ findall(mask)]
-    # _mask_inds = [Tuple(idx) for idx ∈ findall(mask)]
+
+    # _mask_inds = Tuple.(findall(mask))
     # _mask_inds = [_mask_inds; [idx .+ T.((0.5, 0, 0)) for idx ∈ _mask_inds]]
     # _mask_inds = [_mask_inds; [idx .+ T.((0, 0.5, 0)) for idx ∈ _mask_inds]]
     # _mask_inds = [_mask_inds; [idx .+ T.((0, 0, 0.5)) for idx ∈ _mask_inds]]
-    # mask_inds = [idx .+ rand(NTuple{3,T}) .- T(0.5) for idx ∈ _mask_inds]
+    # mask_inds = [idx .+ rand(NTuple{3,T}) ./ 2 .- T(0.25) for idx ∈ _mask_inds]
 
     motion_params = zeros(6, length(img_itp), length(t_refs))
     for (i_ref, t_ref) ∈ enumerate(t_refs)
@@ -54,7 +47,7 @@ function estimate_motion_parameters(img::Array{T,4}; ref_mode=:consensus, subsam
         @tasks for t ∈ axes(img_s, 4)
             @local diff_vals = similar(mask_inds, T)
 
-            fgh! = make_fgh_function(reference, img_itp[t_ref], img_itp[t], center, mask_inds, grad_field, hess_field, diff_vals)
+            fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, grad_field, hess_field, diff_vals)
             res = optimize(Optim.only_fgh!(fgh!), p0, NewtonTrustRegion())
             motion_params[:, t, i_ref] .= Optim.minimizer(res)
         end
@@ -85,8 +78,7 @@ end
 
 
 # --- Combined f, g, h! for Optim.only_fg! or Newton trust-region ---
-function make_fgh_function(reference::AbstractVector{T}, ref_itp, mov_itp, center, mask_inds, grad_field, hess_field, diff_vals) where T
-
+function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_inds, grad_field, hess_field, diff_vals) where T
     function fgh!(F, G, H, p)
         # Residuals
         A = rigid_affine_from_params(p, center)
@@ -141,7 +133,7 @@ end
     smooth_image(img, fwhm; voxel_size=(1,1,1))
 
 Smooth a 3D volume with a Gaussian kernel of given `fwhm` (in the same units as `voxel_size`).
-Returns a Float64 array.
+Returns an array.
 """
 function smooth_image(img::AbstractArray{T,3}, fwhm::T; voxel_size=ntuple(_ -> T(4), 3)) where {T<:Real}
     # Convert FWHM [mm] → σ [voxels]
@@ -198,7 +190,7 @@ function weighted_mean_estimate(estimates; max_iter=100, tol=1e-6)
 
     for _ = 1:max_iter
         residuals = estimates .- consensus
-        weights = 1 ./ (1 .+ sqrt.(sum(abs2, residuals; dims=2))) # Update weights (inverse of RMSE)
+        weights = 1 ./ (1 .+ sqrt.(sum(abs2, residuals; dims=1:2))) #! dims=1:2 calculates the weights for all 6 parameters jointly, while dims=2 calculates them for each parameter separately
 
         consensus_old = consensus
         consensus = sum((weights .* estimates); dims=3) ./ sum(weights; dims=3) # Compute new weighted mean
@@ -210,6 +202,5 @@ function weighted_mean_estimate(estimates; max_iter=100, tol=1e-6)
     consensus = dropdims(consensus, dims=3)
     return consensus
 end
-
 
 end
