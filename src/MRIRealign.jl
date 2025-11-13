@@ -1,4 +1,4 @@
-module ImageRealign
+module MRIRealign
 
 using Images
 using Optim

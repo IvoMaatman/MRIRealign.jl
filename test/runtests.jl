@@ -1,4 +1,4 @@
-using ImageRealign
+using MRIRealign
 using Test
 using ImagePhantoms
 using Interpolations
@@ -43,7 +43,7 @@ hess_field = nothing # using the Gauss-Newton approximation
 img_mov = extrapolate(interpolate(circshift(image, (10, 10, 10)), BSpline(Cubic())), Interpolations.Flat())
 
 diff_vals = similar(inds, Float64)
-fgh! = ImageRealign.make_fgh_function(vec(reference), img_mov, size(image) .÷ 2, inds, grad_field, hess_field, diff_vals)
+fgh! = MRIRealign.make_fgh_function(vec(reference), img_mov, size(image) .÷ 2, inds, grad_field, hess_field, diff_vals)
 
 G = zeros(6)
 H = zeros(6,6)
@@ -97,7 +97,7 @@ ps = [[0.1, 0, 0, 0, 0, 0],
 
 img_interpolated = similar(image)
 for p ∈ ps
-    A = ImageRealign.create_affine_matrix(p, size(image) .÷ 2)
+    A = MRIRealign.create_affine_matrix(p, size(image) .÷ 2)
 
     for i ∈ CartesianIndices(image)
         v = A \ SVector{4,Float64}(i[1], i[2], i[3], 1)

@@ -58,9 +58,9 @@ jobs:
       - run: |
           julia --project=docs -e '
             using Documenter: DocMeta, doctest
-            using ImageRealign
-            DocMeta.setdocmeta!(ImageRealign, :DocTestSetup, :(using ImageRealign); recursive=true)
-            # doctest(ImageRealign)'
+            using MRIRealign
+            DocMeta.setdocmeta!(MRIRealign, :DocTestSetup, :(using MRIRealign); recursive=true)
+            # doctest(MRIRealign)'
       - run: julia --project=docs docs/make.jl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
