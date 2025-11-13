@@ -14,12 +14,13 @@ export estimate_motion_parameters
 
 
 # --- Top-level functions ---
-function estimate_motion_parameters(img::AbstractArray{T,4};
+function estimate_motion_parameters(img::AbstractArray{Tin,4};
     center=size(img)[1:3] .÷ 2,
     ref_mode=:consensus,
-    mask=nothing,
+    mask=trues(size(img)[1:3]),
     fwhm=nothing::Union{Nothing,NTuple{3}}
-) where {T<:Real}
+) where {Tin<:Real}
+    T = Float64 # lower precision results in gradient inacurracies
 
     if ref_mode == :consensus
         t_refs = axes(img, 4)
@@ -65,11 +66,11 @@ function estimate_motion_parameters(img::AbstractArray{T,4};
     end
 
     if ref_mode == :consensus
-        return weighted_mean_estimate!(motion_params; r=mean(size(img)[1:3]))
+        return Tin.(weighted_mean_estimate!(motion_params; r=mean(size(img)[1:3])))
     elseif ref_mode == :mean
-        return motion_params[:, 1:end-1, 1]
+        return Tin.(motion_params[:, 1:end-1, 1])
     else
-        return dropdims(motion_params, dims=3)
+        return Tin.(dropdims(motion_params, dims=3))
     end
 end
 
@@ -95,7 +96,7 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
     function fgh!(F, G, H, p)
         # Residuals
         A = create_affine_matrix(p, center)
-        @inbounds for (n, i) in enumerate(mask_inds)
+        @inbounds for (n, i) ∈ enumerate(mask_inds)
             v = A * SVector{4,T}(i[1], i[2], i[3], 1)
             diff_vals[n] = reference[n] - mov_itp(v[1], v[2], v[3])
         end
@@ -152,7 +153,7 @@ Smooth a 3D volume with a Gaussian kernel of given `fwhm` is a three-tuple (in u
 Returns an array.
 """
 function smooth_image(img::AbstractArray{T,3}, fwhm::NTuple{3}) where {T<:Real}
-    σ = T.(fwhm) ./ (2√(2log(2)))
+    σ = T.(fwhm ./ (2√(2log(2))))
     img = imfilter(img, Kernel.gaussian(σ))
     return img
 end
@@ -166,16 +167,20 @@ function smooth_image(img::AbstractArray{T,4}, fwhm::NTuple{3}) where {T<:Real}
 end
 
 function create_rotation_matrix(rx, ry, rz)
-    Rx = @SMatrix [1 0 0 0; 0 cos(rx) -sin(rx) 0; 0 sin(rx) cos(rx) 0; 0 0 0 1]
-    Ry = @SMatrix [cos(ry) 0 sin(ry) 0; 0 1 0 0; -sin(ry) 0 cos(ry) 0; 0 0 0 1]
-    Rz = @SMatrix [cos(rz) -sin(rz) 0 0; sin(rz) cos(rz) 0 0; 0 0 1 0; 0 0 0 1]
+    Rx = @SMatrix [1 0 0; 0 cos(rx) -sin(rx); 0 sin(rx) cos(rx)]
+    Ry = @SMatrix [cos(ry) 0 sin(ry); 0 1 0; -sin(ry) 0 cos(ry)]
+    Rz = @SMatrix [cos(rz) -sin(rz) 0; sin(rz) cos(rz) 0; 0 0 1]
     R = Rz * Ry * Rx
     return R
 end
 
 function create_affine_matrix(p, center)
     rx, ry, rz, tx, ty, tz = p
-    R = create_rotation_matrix(rx, ry, rz)
+
+    Rx = @SMatrix [1 0 0 0; 0 cos(rx) -sin(rx) 0; 0 sin(rx) cos(rx) 0; 0 0 0 1]
+    Ry = @SMatrix [cos(ry) 0 sin(ry) 0; 0 1 0 0; -sin(ry) 0 cos(ry) 0; 0 0 0 1]
+    Rz = @SMatrix [cos(rz) -sin(rz) 0 0; sin(rz) cos(rz) 0 0; 0 0 1 0; 0 0 0 1]
+    R = Rz * Ry * Rx
 
     T_center_to_origin = @SMatrix [
         1 0 0 -center[1]
@@ -202,6 +207,7 @@ function create_affine_matrix(p, center)
 end
 
 function params_from_rigid_affine(A, center)
+    T = eltype(A)
     R = @SMatrix [A[1, 1] A[1, 2] A[1, 3];
         A[2, 1] A[2, 2] A[2, 3];
         A[3, 1] A[3, 2] A[3, 3]]
@@ -209,11 +215,11 @@ function params_from_rigid_affine(A, center)
 
     # Extract Euler angles for Rz * Ry * Rx
     ry = asin(-R[3, 1])
-    if abs(R[3, 1]) < 1 - 1e-8
+    if abs(R[3, 1]) < 1 - T(1e-8)
         rx = atan(R[3, 2], R[3, 3])
         rz = atan(R[2, 1], R[1, 1])
     else # Gimbal lock case
-        rx = 0.0
+        rx = zero(T)
         if R[3, 1] < 0
             rz = atan(-R[1, 2], -R[1, 3])
         else
