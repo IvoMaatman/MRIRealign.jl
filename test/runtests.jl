@@ -65,7 +65,7 @@ fgh!(nothing, G, H, p0)
 # @test H ≈ H_fd rtol = 0.5
 
 
-## test translations
+## test translation estimates
 imgs = cat(image, circshift(image, (1, 0, 0)), circshift(image, (0, 1, 0)), circshift(image, (0, 0, 1)), dims=4)
 
 p_ref = zeros(6, 4)
@@ -73,20 +73,20 @@ p_ref[4, 2] = 1
 p_ref[5, 3] = 1
 p_ref[6, 4] = 1
 
-@test estimate_motion_parameters(imgs; ref_mode=1) ≈ p_ref rtol = 1e-1
+@test realign!(imgs; ref_mode=1, realign=false) ≈ p_ref rtol = 1e-1
 
 p_ref[4, :] .-= 1
-@test estimate_motion_parameters(imgs; ref_mode=2) ≈ p_ref rtol = 1e-1
+@test realign!(imgs; ref_mode=2, realign=false) ≈ p_ref rtol = 1e-1
 
 p_ref[4, :] .+= 1
 p_ref[5, :] .-= 1
-@test estimate_motion_parameters(imgs; ref_mode=3) ≈ p_ref rtol = 1e-1
+@test realign!(imgs; ref_mode=3, realign=false) ≈ p_ref rtol = 1e-1
 
 p_ref[5, :] .+= 1
 p_ref[6, :] .-= 1
-@test estimate_motion_parameters(imgs; ref_mode=4) ≈ p_ref rtol = 1e-1
+@test realign!(imgs; ref_mode=4, realign=false) ≈ p_ref rtol = 1e-1
 
-## test free movement (rotaions and translations)
+## test rotation estimates (and translations)
 ps = [[0.1, 0, 0, 0, 0, 0],
       [0, 0.1, 0, 0, 0, 0],
       [0, 0, 0.1, 0, 0, 0],
@@ -103,5 +103,24 @@ for p ∈ ps
         v = A \ SVector{4,Float64}(i[1], i[2], i[3], 1)
         img_interpolated[i] = abs.(img_itp(v[1], v[2], v[3]))
     end
-    @test estimate_motion_parameters(cat(image, img_interpolated; dims=4); ref_mode=1)[:,2] ≈ p atol = 1e-1
+
+    img_series = cat(image, img_interpolated; dims=4)
+    img_series_r = copy(img_series)
+
+    img_series_phase = exp.(1im .* axes(img_series, 1) .* π/size(img_series, 1))
+    img_series_c = img_series .* img_series_phase
+
+    @test realign!(img_series_r; ref_mode=1, realign=true)[:,2] ≈ p atol = 1e-1
+    @test realign!(img_series_c; ref_mode=1, realign=true)[:,2] ≈ p atol = 1e-1
+
+    # test if img_series are aligned after the first run
+    @test realign!(img_series_r; ref_mode=1, realign=false)[:,2] ≈ 0 .* p atol = 1e-2
+    @test realign!(img_series_c; ref_mode=1, realign=false)[:,2] ≈ 0 .* p atol = 1e-2
+
+    @test img_series_r[:,:,:,1] ≈ img_series[:,:,:,1] rtol = 1e-3
+    @test img_series_r[:,:,:,2] ≈ img_series[:,:,:,1] rtol = 1e-1
+
+    img_series_c ./= img_series_phase
+    @test img_series_c[:,:,:,1] ≈ img_series[:,:,:,1] rtol = 1e-3
+    @test img_series_c[:,:,:,2] ≈ img_series[:,:,:,1] rtol = 1e-1
 end

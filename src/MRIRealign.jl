@@ -10,37 +10,45 @@ using ImageFiltering
 using Statistics
 using OhMyThreads
 
-export estimate_motion_parameters
+export realign!, create_rotation_matrix
 
 
 # --- Top-level functions ---
-function estimate_motion_parameters(img::AbstractArray{Tin,4};
+function realign!(img::AbstractArray{Tin,4};
     center=size(img)[1:3] .÷ 2,
     ref_mode=:consensus,
     mask=trues(size(img)[1:3]),
-    fwhm=nothing::Union{Nothing,NTuple{3}}
-) where {Tin<:Real}
+    fwhm=nothing::Union{Nothing,NTuple{3}},
+    realign=true
+) where Tin
+
+    if Tin <: Complex
+        _img = abs.(img)
+        Treal = real(Tin)
+    else
+        _img = img
+        Treal = Tin
+    end
     T = Float64 # lower precision results in gradient inacurracies
 
     if ref_mode == :consensus
-        t_refs = axes(img, 4)
+        t_refs = axes(_img, 4)
     elseif ref_mode == :mean
-        img = cat(img, mean(img, dims=4); dims=4)
-        t_refs = size(img, 4)
+        _img = cat(_img, mean(_img, dims=4); dims=4)
+        t_refs = size(_img, 4)
     elseif typeof(ref_mode) <: Integer
         t_refs = ref_mode
     else
         error("ref_mode must either be `:consensus`, `:mean`, or an integer")
     end
 
-    img_s = (fwhm === nothing || all(fwhm .== 0)) ? img : smooth_image(img, fwhm)
+    img_s = (fwhm === nothing || all(fwhm .== 0)) ? _img : smooth_image(_img, fwhm)
 
     # interpolate all time frames
-    _interpolate(x) = extrapolate(interpolate(x, BSpline(Cubic())), Interpolations.Flat())
     @views Tint = typeof(_interpolate(img_s[:, :, :, 1]))
     img_itp = Vector{Tint}(undef, size(img_s, 4))
     @tasks for t ∈ eachindex(img_itp)
-        vol = @view img_s[:, :, :, t]
+        vol = img_s[:, :, :, t]
         vol ./= quantile(vec(vol), T(0.9))
         img_itp[t] = _interpolate(vol)
     end
@@ -48,7 +56,7 @@ function estimate_motion_parameters(img::AbstractArray{Tin,4};
     # random shifts seem to help with the speed of convertion (cf. SPM)
     mask_inds = [Tuple(idx) .+ rand(NTuple{3,T}) .- T(0.5) for idx ∈ findall(mask)]
 
-    motion_params = Array{T}(undef, 6, length(img_itp), length(t_refs))
+    _motion_params = Array{T}(undef, 6, length(img_itp), length(t_refs))
     for (i_ref, t_ref) ∈ enumerate(t_refs)
         reference = [img_itp[t_ref](idx[1], idx[2], idx[3]) for idx in mask_inds]
         grad_field = [gradient(img_itp[t_ref], idx[1], idx[2], idx[3]) for idx ∈ mask_inds]
@@ -61,34 +69,38 @@ function estimate_motion_parameters(img::AbstractArray{Tin,4};
 
             fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, grad_field, hess_field, diff_vals)
             res = optimize(Optim.only_fgh!(fgh!), p0, NewtonTrustRegion())
-            motion_params[:, t, i_ref] .= Optim.minimizer(res)
+            _motion_params[:, t, i_ref] .= Optim.minimizer(res)
         end
     end
 
-    if ref_mode == :consensus
-        return Tin.(weighted_mean_estimate!(motion_params; r=mean(size(img)[1:3])))
+    motion_params = if ref_mode == :consensus
+        weighted_mean_estimate!(_motion_params; r=mean(size(img)[1:3]))
     elseif ref_mode == :mean
-        return Tin.(motion_params[:, 1:end-1, 1])
+        _motion_params[:, 1:end-1, 1]
     else
-        return Tin.(dropdims(motion_params, dims=3))
+        dropdims(_motion_params, dims=3)
     end
+
+    if realign
+        realign!(img, motion_params; center)
+    end
+
+    return Treal.(motion_params)
 end
 
 
-# TODO
-# function realign_volumes(img::Array{<:Real,4}; ref_mode=:first, subsample=4, mask=nothing, σ=3.0)
-#     sx, sy, sz, nt = size(img)
-#     center = voxelcenter(img[:,:,:,1])
-#     aligned = Array{Float64,4}(undef, sx, sy, sz, nt)
-
-#     @tasks for t in 1:nt
-#         println("Realigning volume $t / $nt ...")
-#         A = create_affine_matrix(motion_params[t, :], center)
-#         aligned[:,:,:,t] = warp_volume_itp(moving, A, (sx,sy,sz))
-#     end
-
-#     return motion_params
-# end
+function realign!(img::AbstractArray{T,4}, motion_params; center=size(img)[1:3] .÷ 2) where T
+    @tasks for t ∈ axes(img, 4)
+        vol = @view img[:, :, :, t]
+        img_itp = _interpolate(vol)
+        A = create_affine_matrix(motion_params[:, t], center)
+        @inbounds for idx ∈ CartesianIndices(vol)
+            v = A * SVector{4,Float64}(idx[1], idx[2], idx[3], 1)
+            vol[idx] = img_itp(v[1], v[2], v[3])
+        end
+    end
+    return img
+end
 
 
 # --- Combined f, g, h! for Optim.only_fg! or Newton trust-region ---
@@ -166,6 +178,8 @@ function smooth_image(img::AbstractArray{T,4}, fwhm::NTuple{3}) where {T<:Real}
     return img_s
 end
 
+_interpolate(x) = extrapolate(interpolate(x, BSpline(Cubic())), Interpolations.Flat())
+
 function create_rotation_matrix(rx, ry, rz)
     Rx = @SMatrix [1 0 0; 0 cos(rx) -sin(rx); 0 sin(rx) cos(rx)]
     Ry = @SMatrix [cos(ry) 0 sin(ry); 0 1 0; -sin(ry) 0 cos(ry)]
@@ -233,9 +247,6 @@ function params_from_rigid_affine(A, center)
     return @SVector [rx, ry, rz, t[1], t[2], t[3]]
 end
 
-
-
-
 function weighted_mean_estimate!(estimates; r=1, max_iter=100, tol=1e-6)
     # bring all estimates in the same frame of reference (iframe = end÷2)
     for iref ∈ axes(estimates, 3)
@@ -253,7 +264,7 @@ function weighted_mean_estimate!(estimates; r=1, max_iter=100, tol=1e-6)
 
         residuals = estimates .- consensus
         residuals[1:3, :, :] .*= r # weight rotations by the radius
-        weights = 1 ./ (1 .+ sqrt.(sum(abs2, residuals; dims=1:2))) #! dims=1:2 calculates the weights for all 6 parameters jointly, while dims=2 calculates them for each parameter separately
+        weights = 1 ./ (1 .+ sqrt.(sum(abs2, residuals; dims=1:2))) # dims=1:2 calculates the weights for all 6 parameters jointly, while dims=2 calculates them for each parameter separately
         consensus = sum((weights .* estimates); dims=3) ./ sum(weights; dims=3) # Compute new weighted mean
 
         if norm(consensus .- consensus_old) < tol
