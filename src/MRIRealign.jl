@@ -10,10 +10,32 @@ using ImageFiltering
 using Statistics
 using OhMyThreads
 
-export realign!, create_rotation_matrix
+export realign!, create_rotation_matrix, create_affine_matrix
 
 
 # --- Top-level functions ---
+"""
+    realign!(img; center=size(img)[1:3] .÷ 2, ref_mode=:consensus, mask=trues(size(img)[1:3]), fwhm=nothing, realign=true)
+    realign!(img, motion_params; center=size(img)[1:3] .÷ 2)
+
+Estimate motion parameters and/or realign the images.
+
+# Required argument
+    - `img::AbstractArray{T,4}`: Array of images with the dimensions `x, y, z, t`, i.e., 3D images with time in the 4th dimension. The type T can be real or complex valued. If complex-valued, the motion estimation will be performed on the absolute value; otherwise, on img, i.e., allowing for negative values.
+
+# Keyword arguments if motion parameters are unknown
+    - `center=size(img)[1:3] .÷ 2`: Point around which the images are rotated (relevant only for the estimated motion parameters, not the alignment).
+    - `ref_mode: `:consensus` (default), `:mean`, or an integer. `:consensus` estimates motion parameters pairwise for all timeframes and computes a consensus, which is helpful if any single reference might have poor image quality. This comes at the cost of a `t`-fold increase in computation time. `:mean` estimates the motion parameters wrt. to the mean of all images. This is fast, but might have inferior precision if the mean is blurred by substantial motion. Providing an integer aligns the images wrt. to the `ref_mode`th time frame, which is fast, but works only reliably if this time frame has good image quality.
+    - `mask=trues(size(img)[1:3])`: bitmask at which the frames are compared.
+    - `fwhm=nothing`: 3-Tuple of the full width at half maximum values of an optional Gaussian smoothing kernel along each dimension, in units of voxels. The default setting (`nothing`) is to perform no smoothing.
+    - `realign=true`: If true, the argument `img` will be overwritten inline with the aligned images. If `false`, this function estimates the motion parameters, but does not align the images.
+
+# Optional arguments if the motion parameters are already known
+    - `motion_params::AbstractMatrix`: If the motion parameters are known, e.g., by a previous run of this function, they can be provided to skip the estimation step. The dimensions of this matrix are `6 × T`, capturing in the first dimension the motion parameters, in the order `rx, ry, rz, tx, ty, tz`, with the rotations `r` and the translations `t`. T is the number of time frames.
+    - `center=size(img)[1:3] .÷ 2)`: Point around which `motion_params` are applied.
+
+With the appropriate settings (see above), the aligned timeframes are written inline into `img`. The function always returns the estimated motion parameters, where all rotations are in radians and translations in voxels.
+"""
 function realign!(img::AbstractArray{Tin,4};
     center=size(img)[1:3] .÷ 2,
     ref_mode=:consensus,
@@ -99,7 +121,7 @@ function realign!(img::AbstractArray{T,4}, motion_params; center=size(img)[1:3] 
             vol[idx] = img_itp(v[1], v[2], v[3])
         end
     end
-    return img
+    return motion_params
 end
 
 
@@ -180,6 +202,15 @@ end
 
 _interpolate(x) = extrapolate(interpolate(x, BSpline(Cubic())), Interpolations.Flat())
 
+
+"""
+    create_rotation_matrix(rx, ry, rz)
+    create_rotation_matrix(p) = create_rotation_matrix(p[1], p[2], p[3])
+
+Calculate the rotation matrix for three rotations `rx, ry, rz`, in radians. In this package, we use the convention `R = Rz * Ry * Rx`.
+"""
+create_rotation_matrix(p) = create_rotation_matrix(p[1], p[2], p[3])
+
 function create_rotation_matrix(rx, ry, rz)
     Rx = @SMatrix [1 0 0; 0 cos(rx) -sin(rx); 0 sin(rx) cos(rx)]
     Ry = @SMatrix [cos(ry) 0 sin(ry); 0 1 0; -sin(ry) 0 cos(ry)]
@@ -188,6 +219,11 @@ function create_rotation_matrix(rx, ry, rz)
     return R
 end
 
+"""
+    create_affine_matrix(p, center)
+
+Calculate the affine matrix from `p = rx, ry, rz, tx, ty, tz`. The rotations `r` are in radians and the translations `t` in voxels. The argument `center` takes a 3-Tuple (or vector of length 3) with the center around which the images are rotated.
+"""
 function create_affine_matrix(p, center)
     rx, ry, rz, tx, ty, tz = p
 
