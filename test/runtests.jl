@@ -103,10 +103,10 @@ for p ∈ ps
         v = A \ SVector{4,Float64}(i[1], i[2], i[3], 1)
         img_interpolated[i] = abs.(img_itp(v[1], v[2], v[3]))
     end
-
     img_series = cat(image, img_interpolated; dims=4)
-    img_series_r = copy(img_series)
 
+    # align w/ 1st time frame
+    img_series_r = copy(img_series)
     img_series_phase = exp.(1im .* axes(img_series, 1) .* π/size(img_series, 1))
     img_series_c = img_series .* img_series_phase
 
@@ -123,4 +123,20 @@ for p ∈ ps
     img_series_c ./= img_series_phase
     @test img_series_c[:,:,:,1] ≈ img_series[:,:,:,1] rtol = 1e-3
     @test img_series_c[:,:,:,2] ≈ img_series[:,:,:,1] rtol = 1e-1
+
+    # consensus
+    img_series_r = copy(img_series)
+    img_series_phase = exp.(1im .* axes(img_series, 1) .* π/size(img_series, 1))
+    img_series_c = img_series .* img_series_phase
+
+    realign!(img_series_r; ref_mode=:consensus, realign=true)
+    realign!(img_series_c; ref_mode=:consensus, realign=true)
+
+    # test if img_series are aligned after the first run
+    @test realign!(img_series_r; ref_mode=:consensus, realign=false) ≈ zeros(6,2) atol = 1e-2
+    @test realign!(img_series_c; ref_mode=:consensus, realign=false) ≈ zeros(6,2) atol = 1e-2
+
+    img_series_c ./= img_series_phase
+    @test img_series_r[:,:,:,1] ≈ img_series_r[:,:,:,2] rtol = 1e-1
+    @test img_series_c[:,:,:,1] ≈ img_series_c[:,:,:,2] rtol = 1e-1
 end
