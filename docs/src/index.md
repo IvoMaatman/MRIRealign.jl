@@ -17,12 +17,7 @@ MRIRealign.realign!
 
 ## Helper functions
 
-```@autodocs
-Modules = [MRIRealign]
-Filter = """
-b -> begin
-    obj = Documenter.DocSystem.getobject(b)
-    !(obj === realign!)
-end
-"""
+```@docs
+MRIRealign.create_rotation_matrix
+MRIRealign.create_affine_matrix
 ```

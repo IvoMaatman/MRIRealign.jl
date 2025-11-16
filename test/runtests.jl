@@ -33,7 +33,7 @@ img_itp = extrapolate(interpolate(image, BSpline(Cubic())), Interpolations.Flat(
 
 
 ## test gradients
-inds = [Tuple(idx) .+ rand(NTuple{3,Float64}) .- 0.5 for idx ∈ CartesianIndices(image)]
+inds = [Tuple(idx) .+ ntuple(_ -> rand(Float64), 3) .- 0.5 for idx ∈ CartesianIndices(image)]
 # inds = CartesianIndices(image)
 reference = [img_itp(idx[1], idx[2], idx[3]) for idx in inds]
 grad_field = [Interpolations.gradient(img_itp, idx[1], idx[2], idx[3]) for idx ∈ inds]

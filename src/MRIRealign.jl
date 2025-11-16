@@ -76,7 +76,7 @@ function realign!(img::AbstractArray{Tin,4};
     end
 
     # random shifts seem to help with the speed of convertion (cf. SPM)
-    mask_inds = [Tuple(idx) .+ rand(NTuple{3,T}) .- T(0.5) for idx ∈ findall(mask)]
+    mask_inds = [Tuple(idx) .+ ntuple(_ -> rand(T), 3) .- T(0.5) for idx ∈ findall(mask)]
 
     _motion_params = Array{T}(undef, 6, length(img_itp), length(t_refs))
     for (i_ref, t_ref) ∈ enumerate(t_refs)
