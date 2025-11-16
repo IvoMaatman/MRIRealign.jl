@@ -21,18 +21,18 @@ export realign!, create_rotation_matrix, create_affine_matrix
 Estimate motion parameters and/or realign the images.
 
 # Required argument
-    - `img::AbstractArray{T,4}`: Array of images with the dimensions `x, y, z, t`, i.e., 3D images with time in the 4th dimension. The type T can be real or complex valued. If complex-valued, the motion estimation will be performed on the absolute value; otherwise, on img, i.e., allowing for negative values.
+- `img::AbstractArray{T,4}`: Array of images with the dimensions `x, y, z, t`, i.e., 3D images with time in the 4th dimension. The type T can be real or complex valued. If complex-valued, the motion estimation will be performed on the absolute value; otherwise, on img, i.e., allowing for negative values.
 
 # Keyword arguments if motion parameters are unknown
-    - `center=size(img)[1:3] .÷ 2`: Point around which the images are rotated (relevant only for the estimated motion parameters, not the alignment).
-    - `ref_mode: `:consensus` (default), `:mean`, or an integer. `:consensus` estimates motion parameters pairwise for all timeframes and computes a consensus, which is helpful if any single reference might have poor image quality. This comes at the cost of a `t`-fold increase in computation time. `:mean` estimates the motion parameters wrt. to the mean of all images. This is fast, but might have inferior precision if the mean is blurred by substantial motion. Providing an integer aligns the images wrt. to the `ref_mode`th time frame, which is fast, but works only reliably if this time frame has good image quality.
-    - `mask=trues(size(img)[1:3])`: bitmask at which the frames are compared.
-    - `fwhm=nothing`: 3-Tuple of the full width at half maximum values of an optional Gaussian smoothing kernel along each dimension, in units of voxels. The default setting (`nothing`) is to perform no smoothing.
-    - `realign=true`: If true, the argument `img` will be overwritten inline with the aligned images. If `false`, this function estimates the motion parameters, but does not align the images.
+- `center=size(img)[1:3] .÷ 2`: Point around which the images are rotated (relevant only for the estimated motion parameters, not the alignment).
+- `ref_mode: `:consensus` (default), `:mean`, or an integer. `:consensus` estimates motion parameters pairwise for all timeframes and computes a consensus, which is helpful if any single reference might have poor image quality. This comes at the cost of a `t`-fold increase in computation time. `:mean` estimates the motion parameters wrt. to the mean of all images. This is fast, but might have inferior precision if the mean is blurred by substantial motion. Providing an integer aligns the images wrt. to the `ref_mode`th time frame, which is fast, but works only reliably if this time frame has good image quality.
+- `mask=trues(size(img)[1:3])`: bitmask at which the frames are compared.
+- `fwhm=nothing`: 3-Tuple of the full width at half maximum values of an optional Gaussian smoothing kernel along each dimension, in units of voxels. The default setting (`nothing`) is to perform no smoothing.
+- `realign=true`: If true, the argument `img` will be overwritten inline with the aligned images. If `false`, this function estimates the motion parameters, but does not align the images.
 
 # Optional arguments if the motion parameters are already known
-    - `motion_params::AbstractMatrix`: If the motion parameters are known, e.g., by a previous run of this function, they can be provided to skip the estimation step. The dimensions of this matrix are `6 × T`, capturing in the first dimension the motion parameters, in the order `rx, ry, rz, tx, ty, tz`, with the rotations `r` and the translations `t`. T is the number of time frames.
-    - `center=size(img)[1:3] .÷ 2)`: Point around which `motion_params` are applied.
+- `motion_params::AbstractMatrix`: If the motion parameters are known, e.g., by a previous run of this function, they can be provided to skip the estimation step. The dimensions of this matrix are `6 × T`, capturing in the first dimension the motion parameters, in the order `rx, ry, rz, tx, ty, tz`, with the rotations `r` and the translations `t`. T is the number of time frames.
+- `center=size(img)[1:3] .÷ 2)`: Point around which `motion_params` are applied.
 
 With the appropriate settings (see above), the aligned timeframes are written inline into `img`. The function always returns the estimated motion parameters, where all rotations are in radians and translations in voxels.
 """
