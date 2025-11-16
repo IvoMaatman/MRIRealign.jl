@@ -10,7 +10,7 @@
 TODO
 
 [docs-img]: https://img.shields.io/badge/docs-latest%20release-blue.svg
-[docs-url]: https://MagneticResonanceImaging.github.io/MRIRealign.jl/dev
+[docs-url]: https://magneticresonanceimaging.github.io/MRIRealign.jl/dev/
 
 [gh-actions-img]: https://github.com/MagneticResonanceImaging/MRIRealign.jl/workflows/CI/badge.svg
 [gh-actions-url]: https://github.com/MagneticResonanceImaging/MRIRealign.jl/actions

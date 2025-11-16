@@ -180,12 +180,6 @@ end
 
 
 ## --- utilities ---
-"""
-    smooth_image(img, fwhm)
-
-Smooth a 3D volume with a Gaussian kernel of given `fwhm` is a three-tuple (in units of voxel).
-Returns an array.
-"""
 function smooth_image(img::AbstractArray{T,3}, fwhm::NTuple{3}) where {T<:Real}
     σ = T.(fwhm ./ (2√(2log(2))))
     img = imfilter(img, Kernel.gaussian(σ))
