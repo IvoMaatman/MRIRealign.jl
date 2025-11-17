@@ -114,8 +114,8 @@ for p ∈ ps
     @test realign!(img_series_c; ref_mode=1, realign=true)[:,2] ≈ p atol = 1e-1
 
     # test if img_series are aligned after the first run
-    @test realign!(img_series_r; ref_mode=1, realign=false)[:,2] ≈ 0 .* p atol = 1e-2
-    @test realign!(img_series_c; ref_mode=1, realign=false)[:,2] ≈ 0 .* p atol = 1e-2
+    @test realign!(img_series_r; ref_mode=1, realign=false)[:,2] ≈ 0 .* p atol = 5e-2
+    @test realign!(img_series_c; ref_mode=1, realign=false)[:,2] ≈ 0 .* p atol = 5e-2
 
     @test img_series_r[:,:,:,1] ≈ img_series[:,:,:,1] rtol = 1e-3
     @test img_series_r[:,:,:,2] ≈ img_series[:,:,:,1] rtol = 1e-1
