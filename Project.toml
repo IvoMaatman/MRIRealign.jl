@@ -1,7 +1,7 @@
 name = "MRIRealign"
-uuid = "9689932d-8765-44d0-985b-2d9644d92569"
-version = "0.0.1-DEV"
-authors = ["Jakob Asslaender <jakob.asslaender@nyumc.org> and contributors"]
+uuid = "4447969b-3c70-418c-8ae2-3a391da519f9"
+version = "0.1.0"
+authors = ["Jakob Asslaender <jakob.asslaender@nyumc.org>"]
 
 [deps]
 ImageFiltering = "6a3955dd-da59-5b1f-98d4-e7296123deb5"
