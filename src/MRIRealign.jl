@@ -1,6 +1,7 @@
 module MRIRealign
 
 using Images
+using NLSolversBase
 using Optim
 using StaticArrays
 using LinearAlgebra
@@ -90,7 +91,7 @@ function realign!(img::AbstractArray{Tin,4};
             @local diff_vals = similar(mask_inds, T)
 
             fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, grad_field, hess_field, diff_vals)
-            res = optimize(Optim.only_fgh!(fgh!), p0, NewtonTrustRegion())
+            res = optimize(NLSolversBase.only_fgh!(fgh!), p0, NewtonTrustRegion())
             _motion_params[:, t, i_ref] .= Optim.minimizer(res)
         end
     end
