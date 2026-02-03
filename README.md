@@ -89,7 +89,7 @@ Note that this tutorial assumes that the headers of all NIfTI files are identica
 
 
 [docs-img]: https://img.shields.io/badge/docs-latest%20release-blue.svg
-[docs-url]: https://magneticresonanceimaging.github.io/MRIRealign.jl/dev/
+[docs-url]: https://magneticresonanceimaging.github.io/MRIRealign.jl/stable
 
 [gh-actions-img]: https://github.com/MagneticResonanceImaging/MRIRealign.jl/workflows/CI/badge.svg
 [gh-actions-url]: https://github.com/MagneticResonanceImaging/MRIRealign.jl/actions
