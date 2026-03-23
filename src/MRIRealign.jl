@@ -143,18 +143,41 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
         G === nothing || fill!(G, 0)
         H === nothing || fill!(H, 0)
 
+        # Precompute rotation matrix derivatives for exact Jacobian
+        rx, ry, rz = p[1], p[2], p[3]
+        sr, cr = sincos(rx)
+        sp, cp = sincos(ry)
+        sy, cy = sincos(rz)
+
+        # ∂R/∂rx
+        dRdrx = @SMatrix [
+             0                     cy*sp*cr+sy*sr   -cy*sp*sr+sy*cr;
+             0                     sy*sp*cr-cy*sr   -sy*sp*sr-cy*cr;
+             0                     cp*cr            -cp*sr
+        ]
+        # ∂R/∂ry
+        dRdry = @SMatrix [
+            -cy*sp   cy*cp*sr   cy*cp*cr;
+            -sy*sp   sy*cp*sr   sy*cp*cr;
+            -cp     -sp*sr     -sp*cr
+        ]
+        # ∂R/∂rz
+        dRdrz = @SMatrix [
+            -sy*cp  -sy*sp*sr-cy*cr  -sy*sp*cr+cy*sr;
+             cy*cp   cy*sp*sr-sy*cr   cy*sp*cr+sy*sr;
+             0       0                0
+        ]
+
         # Per-voxel contributions
         @inbounds for i ∈ eachindex(mask_inds)
             x = mask_inds[i][1] - center[1]
             y = mask_inds[i][2] - center[2]
             z = mask_inds[i][3] - center[3]
+            xyz = SVector{3,T}(x, y, z)
 
-            # ∂x/∂params (3×6 Jacobian)
-            Jx = @SMatrix [
-                0 z -y 1 0 0;
-                -z 0 x 0 1 0;
-                y -x 0 0 0 1
-            ]
+            # Exact ∂(A*x)/∂params (3×6 Jacobian), re-linearized at current p
+            Jx = hcat(dRdrx * xyz, dRdry * xyz, dRdrz * xyz,
+                      SMatrix{3,3,T}(1,0,0, 0,1,0, 0,0,1))
 
             gI = grad_field[i]      # ∂I/∂x, shape (3,)
             r = diff_vals[i]
