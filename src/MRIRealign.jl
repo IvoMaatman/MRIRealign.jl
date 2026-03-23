@@ -311,22 +311,115 @@ function weighted_mean_estimate!(estimates; r=1, max_iter=100, tol=1e-6)
         end
     end
 
-    consensus = mean(estimates; dims=3) # Initial guess
+    nframes = size(estimates, 2)
+    nrefs   = size(estimates, 3)
+    consensus = Matrix{Float64}(undef, 6, nframes)
 
-    for _ = 1:max_iter
-        consensus_old = consensus
-
-        residuals = estimates .- consensus
-        residuals[1:3, :, :] .*= r # weight rotations by the radius
-        weights = 1 ./ (1 .+ sqrt.(sum(abs2, residuals; dims=1:2))) # dims=1:2 calculates the weights for all 6 parameters jointly, while dims=2 calculates them for each parameter separately
-        consensus = sum((weights .* estimates); dims=3) ./ sum(weights; dims=3) # Compute new weighted mean
-
-        if norm(consensus .- consensus_old) < tol
-            break
+    for iframe ∈ 1:nframes
+        # Convert all reference estimates for this frame to quaternions + translations
+        quats = Vector{SVector{4,Float64}}(undef, nrefs)
+        trans = Vector{SVector{3,Float64}}(undef, nrefs)
+        for iref ∈ 1:nrefs
+            p = @view estimates[:, iframe, iref]
+            R = create_rotation_matrix(p[1], p[2], p[3])
+            quats[iref] = _rotmat_to_quat(R)
+            trans[iref] = SVector{3,Float64}(p[4], p[5], p[6])
         end
+
+        # Initial consensus: unweighted mean
+        q_mean, t_mean = _quat_weighted_mean(quats, trans, ones(nrefs))
+
+        for _ = 1:max_iter
+            q_old = q_mean
+            t_old = t_mean
+
+            # Compute weights based on geodesic rotation distance + translation distance
+            w = Vector{Float64}(undef, nrefs)
+            for iref ∈ 1:nrefs
+                dot_val = clamp(abs(dot(quats[iref], q_mean)), 0.0, 1.0)
+                rot_dist = 2 * acos(dot_val) * r  # geodesic distance scaled by radius
+                trans_dist = norm(trans[iref] - t_mean)
+                w[iref] = 1 / (1 + sqrt(rot_dist^2 + trans_dist^2))
+            end
+
+            q_mean, t_mean = _quat_weighted_mean(quats, trans, w)
+
+            if norm(t_mean - t_old) + 2 * acos(clamp(abs(dot(q_mean, q_old)), 0.0, 1.0)) < tol
+                break
+            end
+        end
+
+        # Convert quaternion back to Euler angles + translation
+        R_mean = _quat_to_rotmat(q_mean)
+        A_mean = SMatrix{4,4,Float64}(
+            R_mean[1,1], R_mean[2,1], R_mean[3,1], 0,
+            R_mean[1,2], R_mean[2,2], R_mean[3,2], 0,
+            R_mean[1,3], R_mean[2,3], R_mean[3,3], 0,
+            t_mean[1],   t_mean[2],   t_mean[3],   1)
+        consensus[:, iframe] .= params_from_rigid_affine(A_mean, (0, 0, 0))
     end
-    consensus = dropdims(consensus, dims=3)
     return consensus
+end
+
+function _quat_weighted_mean(quats, trans, weights)
+    # Weighted quaternion mean via dominant eigenvector of ∑ wᵢ qᵢ qᵢᵀ
+    M = zeros(MMatrix{4,4,Float64})
+    t_mean = zero(MVector{3,Float64})
+    w_sum = zero(Float64)
+    for i ∈ eachindex(quats)
+        q = quats[i]
+        M .+= weights[i] .* (q * q')
+        t_mean .+= weights[i] .* trans[i]
+        w_sum += weights[i]
+    end
+    t_mean ./= w_sum
+
+    E = eigen(Symmetric(Matrix(M)))
+    q_mean = SVector{4,Float64}(E.vectors[:, end])
+    q_mean = q_mean[1] < 0 ? -q_mean : q_mean  # consistent sign
+    return q_mean, SVector{3,Float64}(t_mean)
+end
+
+function _rotmat_to_quat(R)
+    # Shepperd's method: convert 3×3 rotation matrix to unit quaternion [w, x, y, z]
+    tr = R[1,1] + R[2,2] + R[3,3]
+    if tr > 0
+        s = 2 * sqrt(tr + 1)
+        w = s / 4
+        x = (R[3,2] - R[2,3]) / s
+        y = (R[1,3] - R[3,1]) / s
+        z = (R[2,1] - R[1,2]) / s
+    elseif R[1,1] > R[2,2] && R[1,1] > R[3,3]
+        s = 2 * sqrt(1 + R[1,1] - R[2,2] - R[3,3])
+        w = (R[3,2] - R[2,3]) / s
+        x = s / 4
+        y = (R[1,2] + R[2,1]) / s
+        z = (R[1,3] + R[3,1]) / s
+    elseif R[2,2] > R[3,3]
+        s = 2 * sqrt(1 + R[2,2] - R[1,1] - R[3,3])
+        w = (R[1,3] - R[3,1]) / s
+        x = (R[1,2] + R[2,1]) / s
+        y = s / 4
+        z = (R[2,3] + R[3,2]) / s
+    else
+        s = 2 * sqrt(1 + R[3,3] - R[1,1] - R[2,2])
+        w = (R[2,1] - R[1,2]) / s
+        x = (R[1,3] + R[3,1]) / s
+        y = (R[2,3] + R[3,2]) / s
+        z = s / 4
+    end
+    q = SVector{4,Float64}(w, x, y, z)
+    return q / norm(q)
+end
+
+function _quat_to_rotmat(q)
+    # Convert unit quaternion [w, x, y, z] to 3×3 rotation matrix
+    w, x, y, z = q
+    @SMatrix [
+        1-2(y^2+z^2)  2(x*y-z*w)    2(x*z+y*w);
+        2(x*y+z*w)    1-2(x^2+z^2)  2(y*z-x*w);
+        2(x*z-y*w)    2(y*z+x*w)    1-2(x^2+y^2)
+    ]
 end
 
 end
