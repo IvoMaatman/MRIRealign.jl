@@ -76,13 +76,13 @@ function realign!(img::AbstractArray{Tin,4};
         img_itp[t] = _interpolate(vol)
     end
 
-    # random shifts seem to help with the speed of convertion (cf. SPM)
-    mask_inds = [Tuple(idx) .+ ntuple(_ -> rand(T), 3) .- T(0.5) for idx ∈ findall(mask)]
+    # random shifts seem to help with the speed of convergence (cf. SPM)
+    mask_inds = [SVector{3,T}(Tuple(idx)) + SVector{3,T}(rand(T), rand(T), rand(T)) - SVector{3,T}(0.5, 0.5, 0.5) for idx ∈ findall(mask)]
 
     _motion_params = Array{T}(undef, 6, length(img_itp), length(t_refs))
     for (i_ref, t_ref) ∈ enumerate(t_refs)
-        reference = [img_itp[t_ref](idx[1], idx[2], idx[3]) for idx in mask_inds]
-        grad_field = [gradient(img_itp[t_ref], idx[1], idx[2], idx[3]) for idx ∈ mask_inds]
+        reference = [img_itp[t_ref](ind[1], ind[2], ind[3]) for ind ∈ mask_inds]
+        grad_field = [SVector{3,T}(gradient(img_itp[t_ref], ind[1], ind[2], ind[3])) for ind ∈ mask_inds]
         # hess_field = [hessian(img_itp[t_ref], idx[1], idx[2], idx[3]) for idx ∈ mask_inds]
         hess_field = nothing # using the Gauss-Newton approximation
 
@@ -131,8 +131,8 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
     function fgh!(F, G, H, p)
         # Residuals
         A = create_affine_matrix(p, center)
-        @inbounds for (n, i) ∈ enumerate(mask_inds)
-            v = A * SVector{4,T}(i[1], i[2], i[3], 1)
+        @inbounds for (n, ind) ∈ enumerate(mask_inds)
+            v = A * SVector{4,T}(ind[1], ind[2], ind[3], 1)
             diff_vals[n] = reference[n] - mov_itp(v[1], v[2], v[3])
         end
 
@@ -169,11 +169,10 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
         ]
 
         # Per-voxel contributions
+        c1, c2, c3 = T(center[1]), T(center[2]), T(center[3])
         @inbounds for i ∈ eachindex(mask_inds)
-            x = mask_inds[i][1] - center[1]
-            y = mask_inds[i][2] - center[2]
-            z = mask_inds[i][3] - center[3]
-            xyz = SVector{3,T}(x, y, z)
+            ind = mask_inds[i]
+            xyz = SVector{3,T}(ind[1] - c1, ind[2] - c2, ind[3] - c3)
 
             # Exact ∂(A*x)/∂params (3×6 Jacobian), re-linearized at current p
             Jx = hcat(dRdrx * xyz, dRdry * xyz, dRdrz * xyz,
@@ -181,18 +180,17 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
 
             gI = grad_field[i]      # ∂I/∂x, shape (3,)
             r = diff_vals[i]
+            JtgI = Jx' * gI        # (6,) vector, reused for gradient and Hessian
 
             if G !== nothing
-                G .+= (-2r) .* (Jx' * gI)
+                G .+= (-2r) .* JtgI
             end
 
             if H !== nothing
-                if hess_field === nothing
-                    H .+= 2 .* (Jx' * (gI * gI') * Jx)   # Gauss-Newton approx
-                else
-                    # Hessian term: 2*(JᵀJ - r * second)
-                    HI = hess_field[i]      # ∂²I/∂x², shape (3×3)
-                    H .+= 2 .* (Jx' * (gI * gI') * Jx - r .* (Jx' * HI * Jx))
+                H .+= 2 .* (JtgI * JtgI')   # Gauss-Newton approx (rank-1 update)
+                if hess_field !== nothing
+                    HI = hess_field[i]       # ∂²I/∂x², shape (3×3)
+                    H .-= (2r) .* (Jx' * HI * Jx)
                 end
             end
         end
@@ -244,34 +242,15 @@ Calculate the affine matrix from `p = rx, ry, rz, tx, ty, tz`. The rotations `r`
 """
 function create_affine_matrix(p, center)
     rx, ry, rz, tx, ty, tz = p
-
-    Rx = @SMatrix [1 0 0 0; 0 cos(rx) -sin(rx) 0; 0 sin(rx) cos(rx) 0; 0 0 0 1]
-    Ry = @SMatrix [cos(ry) 0 sin(ry) 0; 0 1 0 0; -sin(ry) 0 cos(ry) 0; 0 0 0 1]
-    Rz = @SMatrix [cos(rz) -sin(rz) 0 0; sin(rz) cos(rz) 0 0; 0 0 1 0; 0 0 0 1]
-    R = Rz * Ry * Rx
-
-    T_center_to_origin = @SMatrix [
-        1 0 0 -center[1]
-        0 1 0 -center[2]
-        0 0 1 -center[3]
-        0 0 0 1
+    R = create_rotation_matrix(rx, ry, rz)
+    c = SVector{3}(center[1], center[2], center[3])
+    t = SVector{3}(tx, ty, tz) + c - R * c  # = translation + center - R * center
+    @SMatrix [
+        R[1,1] R[1,2] R[1,3] t[1];
+        R[2,1] R[2,2] R[2,3] t[2];
+        R[3,1] R[3,2] R[3,3] t[3];
+        0      0      0      1
     ]
-
-    T_back = @SMatrix [
-        1 0 0 center[1]
-        0 1 0 center[2]
-        0 0 1 center[3]
-        0 0 0 1
-    ]
-
-    Atrans = @SMatrix [
-        1 0 0 tx
-        0 1 0 ty
-        0 0 1 tz
-        0 0 0 1
-    ]
-
-    return Atrans * T_back * R * T_center_to_origin
 end
 
 function params_from_rigid_affine(A, center)
