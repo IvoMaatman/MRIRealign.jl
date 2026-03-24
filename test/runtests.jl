@@ -83,9 +83,12 @@ end
     grad_field = [Interpolations.gradient(img_itp, idx[1], idx[2], idx[3]) for idx ∈ inds]
     hess_field = nothing
 
+    c = size(image) .÷ 2
+    xyz_centered = [SVector{3,Float64}(ind[1] - c[1], ind[2] - c[2], ind[3] - c[3]) for ind in inds]
+
     img_mov = extrapolate(interpolate(circshift(image, (10, 10, 10)), BSpline(Cubic())), Interpolations.Flat())
     diff_vals = similar(inds, Float64)
-    fgh! = MRIRealign.make_fgh_function(vec(reference), img_mov, size(image) .÷ 2, inds, grad_field, hess_field, diff_vals)
+    fgh! = MRIRealign.make_fgh_function(vec(reference), img_mov, c, inds, xyz_centered, grad_field, hess_field, diff_vals)
 
     G = zeros(6)
     H = zeros(6, 6)
@@ -104,9 +107,12 @@ end
     grad_field = [Interpolations.gradient(img_itp, idx[1], idx[2], idx[3]) for idx ∈ inds]
     hess_field = nothing
 
+    c = size(image) .÷ 2
+    xyz_centered = [SVector{3,Float64}(ind[1] - c[1], ind[2] - c[2], ind[3] - c[3]) for ind in inds]
+
     img_mov = extrapolate(interpolate(circshift(image, (10, 10, 10)), BSpline(Cubic())), Interpolations.Flat())
     diff_vals = similar(inds, Float64)
-    fgh! = MRIRealign.make_fgh_function(vec(reference), img_mov, size(image) .÷ 2, inds, grad_field, hess_field, diff_vals)
+    fgh! = MRIRealign.make_fgh_function(vec(reference), img_mov, c, inds, xyz_centered, grad_field, hess_field, diff_vals)
 
     for p_test ∈ (zeros(6), [0.05, -0.03, 0.04, 1.0, -0.5, 0.5])
         G = zeros(6)

@@ -79,6 +79,10 @@ function realign!(img::AbstractArray{Tin,4};
     # random shifts seem to help with the speed of convergence (cf. SPM)
     mask_inds = [SVector{3,T}(Tuple(idx)) + SVector{3,T}(rand(T), rand(T), rand(T)) - SVector{3,T}(0.5, 0.5, 0.5) for idx ∈ findall(mask)]
 
+    # Precompute centered coordinates (mask position minus center) — constant across all references and optimizer iterations
+    c_svec = SVector{3,T}(T(center[1]), T(center[2]), T(center[3]))
+    xyz_centered = [ind - c_svec for ind ∈ mask_inds]
+
     _motion_params = Array{T}(undef, 6, length(img_itp), length(t_refs))
     for (i_ref, t_ref) ∈ enumerate(t_refs)
         reference = [img_itp[t_ref](ind[1], ind[2], ind[3]) for ind ∈ mask_inds]
@@ -90,7 +94,7 @@ function realign!(img::AbstractArray{Tin,4};
         @tasks for t ∈ axes(img_s, 4)
             @local diff_vals = similar(mask_inds, T)
 
-            fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, grad_field, hess_field, diff_vals)
+            fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, xyz_centered, grad_field, hess_field, diff_vals)
             res = optimize(NLSolversBase.only_fgh!(fgh!), p0, NewtonTrustRegion())
             _motion_params[:, t, i_ref] .= Optim.minimizer(res)
         end
@@ -127,7 +131,7 @@ end
 
 
 # --- Combined f, g, h! for Optim.only_fg! or Newton trust-region ---
-function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_inds, grad_field, hess_field, diff_vals) where T
+function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_inds, xyz_centered, grad_field, hess_field, diff_vals) where T
     function fgh!(F, G, H, p)
         # Residuals
         A = create_affine_matrix(p, center)
@@ -168,19 +172,26 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
              0       0                0
         ]
 
-        # Per-voxel contributions
-        c1, c2, c3 = T(center[1]), T(center[2]), T(center[3])
+        # Per-voxel contributions — direct dot-product formulation avoids
+        # constructing the 3×6 Jacobian matrix Jx and the matrix-vector
+        # product Jx' * gI.  Instead we compute JtgI (the 6-vector) directly:
+        #   JtgI[1:3] = [dot(dRdrx*xyz, gI), dot(dRdry*xyz, gI), dot(dRdrz*xyz, gI)]
+        #   JtgI[4:6] = gI                   (identity block for translations)
         @inbounds for i ∈ eachindex(mask_inds)
-            ind = mask_inds[i]
-            xyz = SVector{3,T}(ind[1] - c1, ind[2] - c2, ind[3] - c3)
+            xyz = xyz_centered[i]    # precomputed: mask_inds[i] - center
+            gI  = grad_field[i]      # ∂I/∂x, shape (3,)
+            r   = diff_vals[i]
 
-            # Exact ∂(A*x)/∂params (3×6 Jacobian), re-linearized at current p
-            Jx = hcat(dRdrx * xyz, dRdry * xyz, dRdrz * xyz,
-                      SMatrix{3,3,T}(1,0,0, 0,1,0, 0,0,1))
-
-            gI = grad_field[i]      # ∂I/∂x, shape (3,)
-            r = diff_vals[i]
-            JtgI = Jx' * gI        # (6,) vector, reused for gradient and Hessian
+            # Rotation part: dot(dR * xyz, gI) for each of rx, ry, rz
+            drx_xyz = dRdrx * xyz
+            dry_xyz = dRdry * xyz
+            drz_xyz = dRdrz * xyz
+            JtgI = SVector{6,T}(
+                dot(drx_xyz, gI),
+                dot(dry_xyz, gI),
+                dot(drz_xyz, gI),
+                gI[1], gI[2], gI[3]  # translation part (identity block)
+            )
 
             if G !== nothing
                 G .+= (-2r) .* JtgI
@@ -189,6 +200,9 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
             if H !== nothing
                 H .+= 2 .* (JtgI * JtgI')   # Gauss-Newton approx (rank-1 update)
                 if hess_field !== nothing
+                    # Full Hessian correction requires the actual Jacobian matrix
+                    Jx = hcat(drx_xyz, dry_xyz, drz_xyz,
+                              SMatrix{3,3,T}(1,0,0, 0,1,0, 0,0,1))
                     HI = hess_field[i]       # ∂²I/∂x², shape (3×3)
                     H .-= (2r) .* (Jx' * HI * Jx)
                 end
