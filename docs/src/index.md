@@ -4,12 +4,31 @@ CurrentModule = MRIRealign
 
 # MRIRealign.jl
 
-This package aligns a time series of 3D MRI images with similar contrast, following the seminal paper by [Friston et al.](https://doi.org/10.1002/hbm.460030303) It minimizes the squared difference between the images in a given mask. The package was heavily inspired by [SPM's](https://www.fil.ion.ucl.ac.uk/spm/) `spm_realign` function.  The principal advantage over `spm_realign` is speed. Additionally, we implemented a *consensus* estimation, which aligns all time frames pairwise and uses [iteratively reweighted least squares](https://en.wikipedia.org/wiki/Iteratively_reweighted_least_squares) to calculate a consensus between all estimates. Compared to a single reference time frame, the consensus approach is less sensitive to the image quality of the reference frame. Compared with the *mean* time frame as a reference, it avoids difficulties in mapping to a blurred reference.
+MRIRealign.jl performs rigid-body (6-DOF) motion correction for 4-D MRI
+time-series data.  It estimates three rotation angles and three
+translations per volume by minimizing the sum of squared intensity
+differences, then reslices (resamples) the volumes to undo the estimated
+motion.
 
-## Quick Tutorial
+The algorithm follows the seminal paper by
+[Friston et al.](https://doi.org/10.1002/hbm.460030303) and was heavily
+inspired by [SPM's](https://www.fil.ion.ucl.ac.uk/spm/) `spm_realign`
+function.  Key differences from SPM include:
+
+* **Speed** — a Gauss–Newton trust-region optimizer with exact analytic
+  Jacobians of the rotation matrix converges in fewer iterations than
+  SPM's re-estimation loop.
+* **Consensus estimation** — all time frames are aligned pairwise and a
+  robust weighted consensus is computed via
+  [iteratively reweighted least squares](https://en.wikipedia.org/wiki/Iteratively_reweighted_least_squares)
+  with geodesic rotation distance on SO(3).  This is less sensitive to
+  the image quality of any single reference frame and avoids
+  difficulties in mapping to a blurred temporal mean.
+
+## Quick Start
 
 On Unix systems, Julia can be installed with
-```Bash
+```bash
 curl -fsSL https://install.julialang.org | sh
 ```
 
@@ -17,51 +36,62 @@ and on Windows systems with
 ```
 winget install --name Julia --id 9NJNWW8PVKMN -e -s msstore
 ```
-More detailed installation instructions can be found [here](https://julialang.org/install/).
+More detailed installation instructions can be found
+[here](https://julialang.org/install/).
 
 Thereafter, you can start Julia from the command line with
-```Bash
+```bash
 julia
 ```
 
-This section assumes that you have a folder at the path `/path_to_files/` with NIfTI files of the format `mask.nii` and `somename_1.nii`, `somename_2.nii`, ... . Our package does not include loading functions, allowing users to load data from [NIfTI](https://github.com/JuliaNeuroscience/NIfTI.jl), [DICOM](https://github.com/JuliaHealth/DICOM.jl), [Matlab](https://github.com/JuliaIO/MAT.jl), [HDF5](https://github.com/JuliaIO/HDF5.jl) files etc.
+### Loading data
 
-The first time, the packages need to be installed with the package manager:
+This tutorial assumes that you have a folder at the path
+`/path_to_files/` with NIfTI files of the format `mask.nii` and
+`somename_1.nii`, `somename_2.nii`, … .  MRIRealign.jl does not include
+I/O functions, so you are free to load data from
+[NIfTI](https://github.com/JuliaNeuroscience/NIfTI.jl),
+[DICOM](https://github.com/JuliaHealth/DICOM.jl),
+[MAT](https://github.com/JuliaIO/MAT.jl),
+[HDF5](https://github.com/JuliaIO/HDF5.jl) files, etc.
 
-```@Julia
+Install the packages once:
+
+```julia
 using Pkg
 Pkg.add("MRIRealign")
 Pkg.add("NIfTI")
 ```
 
-Thereafter, we can use them:
+Then load them:
 
-```@Julia
+```julia
 using MRIRealign
 using NIfTI
 ```
 
-We can change the directory
-```@Julia
+Change to the data directory:
+
+```julia
 cd("/path_to_files/")
 ```
 
-and, optionally, load a mask and convert it to a binary mask
-```@Julia
+Optionally, load a mask and convert it to a `BitArray`:
+
+```julia
 mask = round.(Bool, niread("mask.nii"))
 ```
-Note that the `.` after round indicates a point-wise operation.
 
-We can create a list of file names in the current folder, except for `mask.nii`, and sort them in natural order, i.e., 1, 2, 3, ... instead of the ASCII order 1, 10, 100, 101, ... .
+Create a sorted list of volume file names (natural numeric order):
 
-```@Julia
+```julia
 files = filter(f -> isfile(f) && f != "mask.nii", readdir())
 files = sort(files, by = file -> parse(Int, match(r"\d+", file).match))
 ```
 
-Using the size of the mask, where `size(mask)...` returns the three dimensions separately, we can allocate an array and load all time frames into it:
+Allocate a 4-D array and read all volumes into it:
 
-```@Julia
+```julia
 img = Array{Float64}(undef, size(mask)..., length(files))
 
 for t in eachindex(files)
@@ -69,13 +99,20 @@ for t in eachindex(files)
 end
 ```
 
-Now we are all set to call the `realign!` function, which will overwrite `img` with the aligned volumes and return the motion parameters, i.e., 3 rotation and 3 translation parameters in this order:
-```@Julia
+### Estimating and applying motion correction
+
+Call [`realign!`](@ref), which overwrites `img` with the aligned volumes
+and returns the motion parameters — a `(6, t)` matrix where each column
+is `[rx, ry, rz, tx, ty, tz]` (rotations in radians, translations in
+voxels):
+
+```julia
 params = realign!(img; mask=mask)
 ```
 
-We can write the aligned images back to the NIfTI files:
-```@Julia
+Write the aligned images back to NIfTI files:
+
+```julia
 for t in eachindex(files)
     ni = niread(files[t])
     ni.raw .= img[:,:,:,t]
@@ -83,18 +120,69 @@ for t in eachindex(files)
 end
 ```
 
-Note that this tutorial assumes that the headers of all NIfTI files are identical and replaces the raw data with interpolated data. For changing the NIfTI header instead, we can call `params = realign!(img; mask=mask, realign=false)` and write `params` to the NIfTI header. For more information, refer to [the NIfTI.jl documentation](https://github.com/JuliaNeuroscience/NIfTI.jl).
+### Estimate-only workflow
+
+To estimate motion parameters without modifying the images:
+
+```julia
+params = realign!(img; mask=mask, realign=false)
+```
+
+The returned `params` can later be applied with the two-argument form:
+
+```julia
+realign!(img, params)
+```
+
+### Reference modes
+
+```julia
+# Robust consensus across all pairwise alignments (default, slowest)
+params = realign!(img; ref_mode=:consensus)
+
+# Align to the temporal mean (fast, may be blurred)
+params = realign!(img; ref_mode=:mean)
+
+# Align to a specific time frame (fast, quality depends on that frame)
+params = realign!(img; ref_mode=1)
+```
+
+### Smoothing
+
+For noisy data, applying Gaussian smoothing before estimation can
+improve robustness.  The `fwhm` keyword accepts a 3-tuple of
+full-width-at-half-maximum values in voxel units:
+
+```julia
+params = realign!(img; fwhm=(5.0, 5.0, 5.0))
+```
+
+!!! note
+    The default `fwhm=nothing` (no smoothing) differs from SPM's default
+    of approximately 5 mm.  For noisy data, setting `fwhm` explicitly is
+    recommended.
+
+!!! note
+    This tutorial assumes that the NIfTI headers of all files are
+    identical and replaces the raw data with interpolated data.  To
+    update the NIfTI header instead (preserving the original voxel
+    data), use `realign=false` and write the parameters into the header.
+    See [the NIfTI.jl documentation](https://github.com/JuliaNeuroscience/NIfTI.jl)
+    for details.
 
 
-## Main Interface
+## API Reference
+
+### Main interface
 
 ```@docs
 MRIRealign.realign!
 ```
 
-## Helper functions
+### Geometric utilities
 
 ```@docs
 MRIRealign.create_rotation_matrix
 MRIRealign.create_affine_matrix
+MRIRealign.params_from_rigid_affine
 ```

@@ -11,31 +11,95 @@ using ImageFiltering
 using Statistics
 using OhMyThreads
 
-export realign!, create_rotation_matrix, create_affine_matrix
+export realign!, create_rotation_matrix, create_affine_matrix, params_from_rigid_affine
 
 
 # --- Top-level functions ---
 """
-    realign!(img; center=size(img)[1:3] .÷ 2, ref_mode=:consensus, mask=trues(size(img)[1:3]), fwhm=nothing, realign=true)
-    realign!(img, motion_params; center=size(img)[1:3] .÷ 2)
+    realign!(img; center, ref_mode, mask, fwhm, realign) -> motion_params
 
-Estimate motion parameters and/or realign the images.
+Estimate rigid-body (6-DOF) motion parameters from a 4-D MRI time series
+and, optionally, reslice the volumes to undo the estimated motion.
 
-# Required argument
-- `img::AbstractArray{T,4}`: Array of images with the dimensions `x, y, z, t`, i.e., 3D images with time in the 4th dimension. The type T can be real or complex valued. If complex-valued, the motion estimation will be performed on the absolute value; otherwise, on img, i.e., allowing for negative values.
+The algorithm minimizes the sum of squared intensity differences between
+each volume and a reference, using a Gauss–Newton trust-region optimizer
+with exact analytic Jacobians of the rotation matrix.
 
-# Keyword arguments if motion parameters are unknown
-- `center=size(img)[1:3] .÷ 2`: Point around which the images are rotated (relevant only for the estimated motion parameters, not the alignment).
-- `ref_mode: `:consensus` (default), `:mean`, or an integer. `:consensus` estimates motion parameters pairwise for all timeframes and computes a consensus, which is helpful if any single reference might have poor image quality. This comes at the cost of a `t`-fold increase in computation time. `:mean` estimates the motion parameters wrt. to the mean of all images. This is fast, but might have inferior precision if the mean is blurred by substantial motion. Providing an integer aligns the images wrt. to the `ref_mode`th time frame, which is fast, but works only reliably if this time frame has good image quality.
-- `mask=trues(size(img)[1:3])`: bitmask at which the frames are compared.
-- `fwhm=nothing`: 3-Tuple of the full width at half maximum values of an optional Gaussian smoothing kernel along each dimension, in units of voxels. The default setting (`nothing`) is to perform no smoothing.
-- `realign=true`: If true, the argument `img` will be overwritten inline with the aligned images. If `false`, this function estimates the motion parameters, but does not align the images.
+# Arguments
+- `img::AbstractArray{T,4}`: image array with dimensions `(x, y, z, t)`.
+  `T` may be real- or complex-valued. For complex data the motion
+  estimation is performed on the magnitude; the phase is resliced along
+  with the magnitude when `realign=true`.
 
-# Optional arguments if the motion parameters are already known
-- `motion_params::AbstractMatrix`: If the motion parameters are known, e.g., by a previous run of this function, they can be provided to skip the estimation step. The dimensions of this matrix are `6 × T`, capturing in the first dimension the motion parameters, in the order `rx, ry, rz, tx, ty, tz`, with the rotations `r` and the translations `t`. T is the number of time frames.
-- `center=size(img)[1:3] .÷ 2)`: Point around which `motion_params` are applied.
+# Keyword arguments
+- `center=size(img)[1:3] .÷ 2`: rotation center in voxel coordinates.
+  Only affects the *parameterization* of the motion (i.e., the returned
+  translation values); the aligned images are identical regardless of
+  `center`.
+- `ref_mode=:consensus`: reference strategy. One of
+  - `:consensus` — align every pair of time frames and compute a
+    robust weighted consensus (IRLS with geodesic rotation distance).
+    Most accurate, but `t`-fold slower than a single reference.
+  - `:mean` — align each frame to the temporal mean. Fast, but the
+    mean may be blurred when motion is large.
+  - an `Integer` — align every frame to the given time-frame index.
+    Fast; works well when that frame has good image quality.
+- `mask=trues(size(img)[1:3])`: `BitArray` or `Bool` array selecting the
+  voxels over which the cost function is evaluated.
+- `fwhm=nothing`: optional Gaussian smoothing kernel specified as a
+  3-tuple of full-width-at-half-maximum values `(σx, σy, σz)` in voxel
+  units. `nothing` (default) applies no smoothing. Smoothing can improve
+  robustness for noisy data.
+- `realign=true`: if `true`, `img` is overwritten in-place with the
+  motion-corrected volumes. If `false`, only the parameters are
+  estimated.
 
-With the appropriate settings (see above), the aligned timeframes are written inline into `img`. The function always returns the estimated motion parameters, where all rotations are in radians and translations in voxels.
+# Returns
+- `motion_params::Matrix{T}` of size `(6, t)`. Each column holds
+  `[rx, ry, rz, tx, ty, tz]` — three rotation angles in **radians** and
+  three translations in **voxels** — for the corresponding time frame.
+
+# Examples
+```julia
+# Estimate and apply motion correction
+params = realign!(img)
+
+# Estimate only (no reslicing), using frame 1 as reference
+params = realign!(img; ref_mode=1, realign=false)
+
+# With a brain mask and smoothing
+params = realign!(img; mask=brain_mask, fwhm=(5.0, 5.0, 5.0))
+```
+
+See also [`realign!(img, motion_params)`](@ref), [`create_affine_matrix`](@ref).
+
+---
+
+    realign!(img, motion_params; center=size(img)[1:3] .÷ 2) -> motion_params
+
+Reslice `img` in-place using pre-computed `motion_params` (e.g., from a
+previous call to [`realign!`](@ref)).
+
+# Arguments
+- `img::AbstractArray{T,4}`: image array with dimensions `(x, y, z, t)`.
+- `motion_params::AbstractMatrix`: `(6, t)` matrix of motion parameters
+  in the format `[rx, ry, rz, tx, ty, tz]` per column, with rotations in
+  radians and translations in voxels.
+
+# Keyword arguments
+- `center=size(img)[1:3] .÷ 2`: rotation center that was used when
+  `motion_params` was estimated.
+
+# Returns
+- `motion_params` (the same matrix that was passed in).
+
+# Examples
+```julia
+# Two-step workflow: estimate, then apply later
+params = realign!(img; realign=false)
+# ... inspect params ...
+realign!(img, params)
+```
 """
 function realign!(img::AbstractArray{Tin,4};
     center=size(img)[1:3] .÷ 2,
@@ -234,10 +298,25 @@ _interpolate(x) = extrapolate(interpolate(x, BSpline(Cubic())), Interpolations.F
 
 
 """
-    create_rotation_matrix(rx, ry, rz)
-    create_rotation_matrix(p) = create_rotation_matrix(p[1], p[2], p[3])
+    create_rotation_matrix(rx, ry, rz) -> SMatrix{3,3}
+    create_rotation_matrix(p)          -> SMatrix{3,3}
 
-Calculate the rotation matrix for three rotations `rx, ry, rz`, in radians. In this package, we use the convention `R = Rz * Ry * Rx`.
+Build a 3×3 rotation matrix from three Euler angles `rx`, `ry`, `rz`
+(in radians), using the ZYX intrinsic convention: `R = Rz * Ry * Rx`.
+
+The single-argument form extracts `(p[1], p[2], p[3])`, so any indexable
+collection (vector, tuple, `SVector`, …) works.
+
+# Examples
+```jldoctest
+julia> R = create_rotation_matrix(0.0, 0.0, 0.0)
+3×3 StaticArraysCore.SMatrix{3, 3, Float64, 9} with indices SOneTo(3)×SOneTo(3):
+ 1.0  0.0  0.0
+ 0.0  1.0  0.0
+ 0.0  0.0  1.0
+```
+
+See also [`create_affine_matrix`](@ref).
 """
 create_rotation_matrix(p) = create_rotation_matrix(p[1], p[2], p[3])
 
@@ -250,9 +329,30 @@ function create_rotation_matrix(rx, ry, rz)
 end
 
 """
-    create_affine_matrix(p, center)
+    create_affine_matrix(p, center) -> SMatrix{4,4}
 
-Calculate the affine matrix from `p = rx, ry, rz, tx, ty, tz`. The rotations `r` are in radians and the translations `t` in voxels. The argument `center` takes a 3-Tuple (or vector of length 3) with the center around which the images are rotated.
+Build a 4×4 homogeneous rigid-body transformation matrix from the
+6-element parameter vector `p = [rx, ry, rz, tx, ty, tz]`.
+
+- `rx, ry, rz`: rotation angles in **radians** (ZYX convention).
+- `tx, ty, tz`: translations in **voxels**.
+- `center`: 3-element rotation center `(cx, cy, cz)` in voxel coordinates.
+
+The transformation is  `x′ = R * (x - center) + center + t`, so that
+rotations are applied about `center` and translations are added
+afterward.
+
+# Examples
+```jldoctest
+julia> A = create_affine_matrix([0, 0, 0, 1, 2, 3], (0, 0, 0))
+4×4 StaticArraysCore.SMatrix{4, 4, Float64, 16} with indices SOneTo(4)×SOneTo(4):
+ 1.0  0.0  0.0  1.0
+ 0.0  1.0  0.0  2.0
+ 0.0  0.0  1.0  3.0
+ 0.0  0.0  0.0  1.0
+```
+
+See also [`params_from_rigid_affine`](@ref), [`create_rotation_matrix`](@ref).
 """
 function create_affine_matrix(p, center)
     rx, ry, rz, tx, ty, tz = p
@@ -267,6 +367,26 @@ function create_affine_matrix(p, center)
     ]
 end
 
+"""
+    params_from_rigid_affine(A, center) -> SVector{6}
+
+Extract the 6-DOF parameter vector `[rx, ry, rz, tx, ty, tz]` from a
+4×4 homogeneous rigid-body matrix `A` and the rotation `center` that was
+used to construct it.
+
+This is the inverse of [`create_affine_matrix`](@ref):
+
+```jldoctest
+julia> p = [0.1, -0.05, 0.2, 3.0, -2.0, 1.0];
+
+julia> A = create_affine_matrix(p, (32, 32, 32));
+
+julia> collect(params_from_rigid_affine(A, (32, 32, 32))) ≈ p
+true
+```
+
+See also [`create_affine_matrix`](@ref).
+"""
 function params_from_rigid_affine(A, center)
     T = eltype(A)
     R = @SMatrix [A[1, 1] A[1, 2] A[1, 3];
