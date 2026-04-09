@@ -16,7 +16,7 @@ export realign!, create_rotation_matrix, create_affine_matrix, params_from_rigid
 
 # --- Top-level functions ---
 """
-    realign!(img; center, ref_mode, mask, fwhm, realign) -> motion_params
+    realign!(img; center, ref_mode, mask, fwhm, realign, f_reltol) -> motion_params
 
 Estimate rigid-body (6-DOF) motion parameters from a 4-D MRI time series
 and, optionally, reslice the volumes to undo the estimated motion.
@@ -53,6 +53,9 @@ with exact analytic Jacobians of the rotation matrix.
 - `realign=true`: if `true`, `img` is overwritten in-place with the
   motion-corrected volumes. If `false`, only the parameters are
   estimated.
+- `f_reltol=1e-6`: sets the relative tolerance for changes in the objective 
+  value. Stops the optimizer from performing many iterations when updates 
+  to the motion parameters are negligible.
 
 # Returns
 - `motion_params::Matrix{T}` of size `(6, t)`. Each column holds
@@ -106,7 +109,8 @@ function realign!(img::AbstractArray{Tin,4};
     ref_mode=:consensus,
     mask=trues(size(img)[1:3]),
     fwhm=nothing::Union{Nothing,NTuple{3}},
-    realign=true
+    realign=true,
+    f_reltol=1e-6
 ) where Tin
 
     if Tin <: Complex
@@ -159,7 +163,7 @@ function realign!(img::AbstractArray{Tin,4};
             @local diff_vals = similar(mask_inds, T)
 
             fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, xyz_centered, grad_field, hess_field, diff_vals)
-            res = optimize(NLSolversBase.only_fgh!(fgh!), p0, NewtonTrustRegion())
+            res = optimize(NLSolversBase.only_fgh!(fgh!), p0, NewtonTrustRegion(), Optim.Options(f_reltol=f_reltol))
             _motion_params[:, t, i_ref] .= Optim.minimizer(res)
         end
     end
