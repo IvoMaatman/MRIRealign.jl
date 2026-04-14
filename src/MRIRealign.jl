@@ -16,7 +16,8 @@ export realign!, create_rotation_matrix, create_affine_matrix, params_from_rigid
 
 # --- Top-level functions ---
 """
-    realign!(img; center, ref_mode, mask, fwhm, realign) -> motion_params
+
+    realign!(img; center, ref_mode, mask, fwhm, realign, voxel_size, radius, x_abstol) -> motion_params
 
 Estimate rigid-body (6-DOF) motion parameters from a 4-D MRI time series
 and, optionally, reslice the volumes to undo the estimated motion.
@@ -24,6 +25,14 @@ and, optionally, reslice the volumes to undo the estimated motion.
 The algorithm minimizes the sum of squared intensity differences between
 each volume and a reference, using a Gauss–Newton trust-region optimizer
 with exact analytic Jacobians of the rotation matrix.
+
+Internally, the six motion parameters are reparameterized so that the
+optimizer works in a homogeneous space where every component has units of
+**millimeters**.  Rotation angles are scaled by `radius` (an arc-length)
+and translations are scaled by `voxel_size`.  This improves optimizer
+conditioning and makes the convergence tolerance `x_abstol` physically
+meaningful.  The returned parameters are converted back to the standard
+representation (radians + voxels).
 
 # Arguments
 - `img::AbstractArray{T,4}`: image array with dimensions `(x, y, z, t)`.
@@ -53,6 +62,20 @@ with exact analytic Jacobians of the rotation matrix.
 - `realign=true`: if `true`, `img` is overwritten in-place with the
   motion-corrected volumes. If `false`, only the parameters are
   estimated.
+- `voxel_size::NTuple{3}=(1.0, 1.0, 1.0)`: voxel dimensions in
+  **millimeters**, e.g. `(1.5, 1.5, 3.0)`.  Used to convert translation
+  parameters to mm in the internal optimizer space so that all six
+  degrees of freedom share a common physical unit.
+- `radius::Real=64.0`: characteristic head radius in **millimeters**.
+  Rotation angles (in radians) are multiplied by `radius` to obtain
+  arc-length displacements in mm, placing rotations on the same footing
+  as translations inside the optimizer.  A typical adult-brain value is
+  60–80 mm.
+- `x_abstol::Real=1e-3`: absolute convergence tolerance for the
+  optimizer, in **millimeters**.  The optimizer terminates when the
+  parameter step (in the internal mm space) falls below this value.
+  The default of `1e-3` mm (1 μm) is far below any practical MRI
+  resolution.
 
 # Returns
 - `motion_params::Matrix{T}` of size `(6, t)`. Each column holds
@@ -61,14 +84,18 @@ with exact analytic Jacobians of the rotation matrix.
 
 # Examples
 ```julia
-# Estimate and apply motion correction
+
+# Estimate and apply motion correction 1 mm isotropic voxels)
 params = realign!(img)
+
+# Specify voxel size and head radius
+params = realign!(img; voxel_size=(1.5, 1.5, 3.0), radius=70.0)
 
 # Estimate only (no reslicing), using frame 1 as reference
 params = realign!(img; ref_mode=1, realign=false)
 
-# With a brain mask and smoothing
-params = realign!(img; mask=brain_mask, fwhm=(5.0, 5.0, 5.0))
+# With a brain mask, smoothing, and a coarser tolerance (10 μm)
+params = realign!(img; mask=brain_mask, fwhm=(5.0, 5.0, 5.0), x_abstol=0.01)
 ```
 
 See also [`realign!(img, motion_params)`](@ref), [`create_affine_matrix`](@ref).
@@ -106,7 +133,10 @@ function realign!(img::AbstractArray{Tin,4};
     ref_mode=:consensus,
     mask=trues(size(img)[1:3]),
     fwhm=nothing::Union{Nothing,NTuple{3}},
-    realign=true
+    realign=true,
+    voxel_size::NTuple{3}=(1.0, 1.0, 1.0),
+    radius::Real=64.0,
+    x_abstol::Real=1e-3 # stop when displacement step is <1 μm
 ) where Tin
 
     if Tin <: Complex
@@ -130,6 +160,9 @@ function realign!(img::AbstractArray{Tin,4};
     end
 
     img_s = (fwhm === nothing || all(fwhm .== 0)) ? _img : smooth_image(_img, fwhm)
+    
+    # s maps: p = q ./ s, or equivalently q = p .* s
+    s = SVector{6,T}(radius, radius, radius, voxel_size[1], voxel_size[2], voxel_size[3])
 
     # interpolate all time frames
     @views Tint = typeof(_interpolate(img_s[:, :, :, 1]))
@@ -154,13 +187,16 @@ function realign!(img::AbstractArray{Tin,4};
         # hess_field = [hessian(img_itp[t_ref], idx[1], idx[2], idx[3]) for idx ∈ mask_inds]
         hess_field = nothing # using the Gauss-Newton approximation
 
-        p0 = zeros(T, 6)
+        q0 = zeros(T, 6)
         @tasks for t ∈ axes(img_s, 4)
             @local diff_vals = similar(mask_inds, T)
 
-            fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, xyz_centered, grad_field, hess_field, diff_vals)
-            res = optimize(NLSolversBase.only_fgh!(fgh!), p0, NewtonTrustRegion())
-            _motion_params[:, t, i_ref] .= Optim.minimizer(res)
+            fgh! = make_fgh_function(reference, img_itp[t], center, mask_inds, xyz_centered, 
+                                     grad_field, hess_field, diff_vals, s)
+            res = optimize(NLSolversBase.only_fgh!(fgh!), q0, NewtonTrustRegion(), 
+                           Optim.Options(x_abstol=x_abstol))
+            q_opt = Optim.minimizer(res)
+            _motion_params[:, t, i_ref] .= q_opt ./ s # convert back to voxel units
         end
     end
 
@@ -195,8 +231,10 @@ end
 
 
 # --- Combined f, g, h! for Optim.only_fg! or Newton trust-region ---
-function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_inds, xyz_centered, grad_field, hess_field, diff_vals) where T
-    function fgh!(F, G, H, p)
+function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_inds, xyz_centered, grad_field, hess_field, diff_vals, s::SVector{6,T}) where T
+    function fgh!(F, G, H, q) # convert optimizer params (mm) to physical params (rad, voxels)
+        p = q ./ s
+
         # Residuals
         A = create_affine_matrix(p, center)
         @inbounds for (n, ind) ∈ enumerate(mask_inds)
@@ -250,12 +288,18 @@ function make_fgh_function(reference::AbstractVector{T}, mov_itp, center, mask_i
             drx_xyz = dRdrx * xyz
             dry_xyz = dRdry * xyz
             drz_xyz = dRdrz * xyz
-            JtgI = SVector{6,T}(
+
+            # JtgI_p is the Jacobian w.r.t p (parameters in units of radians and voxels)
+            JtgI_p = SVector{6,T}(
                 dot(drx_xyz, gI),
                 dot(dry_xyz, gI),
                 dot(drz_xyz, gI),
                 gI[1], gI[2], gI[3]  # translation part (identity block)
             )
+
+            # Chain rule: ∂f/∂q = ∂f/∂p * ∂p/∂q = JtgI_p ./ s
+            # because p_i = q_i / s_i  →  ∂p_i/∂q_i = 1/s_i
+            JtgI = JtgI_p ./ s
 
             if G !== nothing
                 G .+= (-2r) .* JtgI
